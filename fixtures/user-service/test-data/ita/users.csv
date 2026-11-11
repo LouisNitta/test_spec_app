@@ -1,0 +1,6 @@
+id,purpose,cases,name,email,role,status,phone,birthday,created_at,deleted_at
+5b3e1c7a-2f4d-4e8b-9a61-0c7d2e8f4a01,管理者ユーザー。管理者権限が必要なAPIのログインユーザーとして使う,ユーザー登録API#1 ユーザー登録API#2 ユーザー登録API#3 ユーザー登録API#4 ユーザー登録API#5 ユーザー登録API#6 ユーザー登録API#9 ユーザー登録API#10 ユーザー登録API#11 ユーザー登録API#12 ユーザー取得API#1 ユーザー取得API#2,管理者 一郎,admin@example.com,admin,active,-,-,-,NULL
+8d1f4a2c-6e3b-4c97-b0d5-1e9a3f7c5b02,閲覧者ユーザー。権限不足（403）の確認に使う,ユーザー登録API#8,閲覧 次郎,viewer@example.com,viewer,active,-,-,-,NULL
+2a7c9e4f-1b6d-4f38-8c2a-5d0e7b3f9c03,登録済みのメールアドレス taro@example.com を持つユーザー。重複登録（409）の確認に使う,ユーザー登録API#6,-,taro@example.com,-,active,-,-,-,NULL
+c6e2b8d1-9a4f-4b05-a7e3-2f8c1d6b0e04,取得APIで取得する対象のユーザー。任意項目もすべて入れておく,ユーザー取得API#1,佐藤 花子,hanako@example.com,member,active,090-1234-5678,1995-04-01,-,NULL
+f9d3a6b2-4c8e-4a71-b2f6-8e5c0a9d1f05,停止中のユーザー。停止中のユーザーは取得できないことの確認に使う予定,,停止 三郎,suspended@example.com,member,suspended,-,-,-,2026-10-01 00:00:00

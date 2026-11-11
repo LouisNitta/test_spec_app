@@ -1,0 +1,42 @@
+meta:
+  type: api
+  name: ユーザー取得API
+  method: GET
+  path: /users/{id}
+updatedAt: "2026-10-24"
+changes: 初版作成
+cases:
+  - id: 2e7d4b19-5a3c-4f86-9e1b-b8c6d2a4f401
+    status: 有効
+    perspective: 正常
+    execution: 自動
+    title: 存在するユーザーを取得できる
+    request:
+      path: /users/{DBに存在するユーザーのUUIDv4}
+      headers:
+        Authorization: Bearer {管理者のトークン}
+    expected:
+      - ステータスコードが 200 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          id: "{DBに存在するユーザーのUUIDv4}"
+          name: 佐藤 花子
+          email: hanako@example.com
+    notes:
+      - admin 権限のユーザーでログインしていること
+  - id: 7b2f8c46-1d9e-4a03-8c5f-e9a1b3d7c402
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: 存在しないユーザーの場合404を返す
+    request:
+      path: /users/{DBに存在しないUUIDv4}
+      headers:
+        Authorization: Bearer {管理者のトークン}
+    expected:
+      - ステータスコードが 404 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          code: USER_NOT_FOUND
+    notes:
+      - admin 権限のユーザーでログインしていること

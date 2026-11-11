@@ -1,0 +1,115 @@
+meta:
+  type: ui
+  name: 会員登録画面
+updatedAt: "2026-10-10"
+changes: 初版作成
+cases:
+  - id: 1b6f3c2a-8e4d-4a71-9c05-d2e7f8a3b101
+    status: 有効
+    perspective: 正常
+    execution: 自動
+    title: 必須項目を入力して登録できる
+    description: 名前・メールアドレス・パスワードを入力して登録し、登録完了画面に遷移することを確認する。
+    steps:
+      - action: 会員登録画面を開く
+        expected:
+          - 「登録する」ボタンが非活性である
+      - action: 名前に `山田 太郎`、メールアドレスに `taro@example.com`、パスワードに `password123` を入力する
+        expected:
+          - 「登録する」ボタンが活性になる
+      - action: 利用規約に同意するチェックボックスをオンにする
+      - action: 「登録する」ボタンを押す
+        expected:
+          - 登録完了画面（`/signup/complete`）に遷移する
+          - 画面に「会員登録が完了しました」と表示される
+    notes:
+      - users テーブルに taro@example.com のレコードが存在しないこと
+      - text: 会員登録API が 201 を返すようにモックする
+        code:
+          id: 1092
+          name: 山田 太郎
+          email: taro@example.com
+  - id: 2c7a4d3b-9f5e-4b82-8d16-e3f8a9b4c202
+    status: 有効
+    perspective: 正常
+    execution: 自動
+    title: パスワードの表示切り替えができる
+    description: 目のアイコンを押すと、パスワードの表示と非表示が切り替わることを確認する。
+    steps:
+      - action: 会員登録画面を開き、パスワードに `password123` を入力する
+        expected:
+          - パスワードが伏せ字で表示される
+      - action: パスワード欄の目のアイコンを押す
+        expected:
+          - パスワードが `password123` と表示される
+          - アイコンが「非表示」に切り替わる
+      - action: もう一度目のアイコンを押す
+        expected:
+          - パスワードが伏せ字に戻る
+    notes: []
+  - id: 3d8b5e4c-a06f-4c93-9e27-f4a9b0c5d303
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: メールアドレスが重複している場合エラーを表示する
+    description: 登録済みのメールアドレスで登録した場合、エラーが表示され入力内容が保持されることを確認する。
+    steps:
+      - action: 会員登録画面を開く
+      - action: 名前に `山田 太郎`、メールアドレスに登録済みの `taro@example.com`、パスワードに `password123` を入力し、利用規約に同意する
+      - action: 「登録する」ボタンを押す
+        expected:
+          - メールアドレス欄の下にエラーメッセージ「このメールアドレスは既に登録されています」が表示される
+          - 入力内容が保持されている
+          - 登録完了画面に遷移しない
+    notes:
+      - users テーブルに taro@example.com のレコードが存在すること
+      - text: 会員登録API が 409 を返すようにモックする
+        code:
+          code: EMAIL_ALREADY_EXISTS
+          message: 指定されたメールアドレスは既に登録されています
+  - id: 4e9c6f5d-b17a-4da4-8f38-a5b0c1d6e404
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: パスワードが要件を満たさない場合バリデーションエラーを表示する
+    description: 8文字未満、または英数字を含まないパスワードを入力した場合、入力欄の下にエラーが表示されることを確認する。
+    steps:
+      - action: 会員登録画面を開き、パスワードに `abc12` を入力する
+        expected:
+          - パスワード欄の下に「英数字8文字以上で入力してください」と表示される
+          - 「登録する」ボタンが非活性のままである
+      - action: パスワードを `password123` に修正する
+        expected:
+          - エラー表示が消える
+    notes:
+      - パスワードの要件は「英字と数字をそれぞれ1文字以上含む8文字以上」
+  - id: 6abe8b7f-d39c-4fc6-8b5a-c7d2e3f8a606
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: サーバーエラーの場合はエラー画面を表示する
+    description: 会員登録API が 500 を返した場合、共通のエラー画面に遷移することを確認する。
+    steps:
+      - action: 会員登録画面を開き、必須項目をすべて入力して利用規約に同意する
+      - action: 「登録する」ボタンを押す
+        expected:
+          - 共通エラー画面（`/error`）に遷移する
+          - 画面に「時間をおいて再度お試しください」と表示される
+    notes:
+      - 会員登録API が 500 を返すようにモックする
+  - id: 7bcf9c80-e4ad-40d7-9c6b-d8e3f4a9b707
+    status: 有効
+    perspective: 正常
+    execution: 手動
+    title: 登録完了メールが届く
+    description: 登録後、入力したメールアドレス宛てに登録完了メールが届くことを目視で確認する。
+    steps:
+      - action: 必須項目を入力して登録する
+        expected:
+          - 登録完了画面に遷移する
+      - action: 入力したメールアドレスの受信箱を確認する
+        expected:
+          - 件名が「【サンプル】会員登録が完了しました」のメールが届いている
+          - 本文の氏名が登録内容と一致している
+    notes:
+      - 検証環境のメールサーバー（Mailpit）で確認する

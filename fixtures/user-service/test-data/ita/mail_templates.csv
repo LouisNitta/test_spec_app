@@ -1,0 +1,3 @@
+id,purpose,cases,code,subject,body,from_address,updated_at
+7e4b2d9c-3a1f-4c86-9d5e-6b0f8a2c4d01,会員登録完了メールのテンプレート。文面の確認に使う,ユーザー登録API#9,registration_complete,【サンプル】会員登録が完了しました,"{{name}} 様
+会員登録が完了しました。",no-reply@example.com,-

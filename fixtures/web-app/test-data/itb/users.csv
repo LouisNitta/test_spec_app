@@ -1,0 +1,2 @@
+id,purpose,cases,name,email,role,status,phone,birthday,created_at,deleted_at
+3c8f1a5e-7d2b-4e94-a6c0-9b4d2e8f1a01,登録済みのメールアドレスを持つユーザー。会員登録画面で重複エラーの確認に使う,会員登録画面#3,-,registered@example.com,-,active,-,-,-,NULL

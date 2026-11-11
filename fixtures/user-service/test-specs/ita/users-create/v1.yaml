@@ -1,0 +1,242 @@
+meta:
+  type: api
+  name: ユーザー登録API
+  method: POST
+  path: /users
+updatedAt: "2026-10-10"
+changes: 初版作成
+cases:
+  - id: 8c1d2f4a-6b3e-4f7a-9d21-5e8b7c0a1f01
+    status: 有効
+    perspective: 正常
+    execution: 自動
+    title: 必須項目のみで登録できる
+    description: 名前とメールアドレスのみを指定してユーザーを登録し、201 と登録内容が返ることを確認する。
+    request:
+      path: /users
+      headers:
+        Authorization: Bearer {管理者のトークン}
+        Content-Type: application/json
+      body:
+        name: 山田 太郎
+        email: taro@example.com
+    expected:
+      - ステータスコードが 201 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          name: 山田 太郎
+          email: taro@example.com
+          role: member
+      - users テーブルにレコードが 1 件作成されている
+    notes:
+      - admin 権限のユーザーでログインしていること
+      - users テーブルに taro@example.com のレコードが存在しない
+  - id: 2f9b7e13-0c4d-4a8e-b5f2-71d3e6a9c402
+    status: 有効
+    perspective: 正常
+    execution: 自動
+    title: 任意項目をすべて指定して登録できる
+    description: 電話番号・生年月日を含むすべての項目を指定して登録し、任意項目も保存されることを確認する。
+    request:
+      path: /users
+      headers:
+        Authorization: Bearer {管理者のトークン}
+        Content-Type: application/json
+      body:
+        name: 佐藤 花子
+        email: hanako@example.com
+        phone: 090-1234-5678
+        birthday: "1995-04-01"
+    expected:
+      - ステータスコードが 201 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          name: 佐藤 花子
+          email: hanako@example.com
+          phone: 090-1234-5678
+          birthday: "1995-04-01"
+          role: member
+      - users テーブルの phone, birthday に値が保存されている
+    notes:
+      - admin 権限のユーザーでログインしていること
+      - users テーブルに hanako@example.com のレコードが存在しない
+  - id: c47a0e85-91b2-4d6f-8a3c-0e5f2b7d1803
+    status: 有効
+    perspective: 正常
+    execution: 自動
+    title: ロールに admin を指定して管理者ユーザーを登録できる
+    description: role に admin を指定した場合、管理者ユーザーとして登録されることを確認する。
+    request:
+      path: /users
+      headers:
+        Authorization: Bearer {管理者のトークン}
+        Content-Type: application/json
+      body:
+        name: 管理者 二郎
+        email: admin2@example.com
+        role: admin
+    expected:
+      - ステータスコードが 201 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          email: admin2@example.com
+          role: admin
+    notes:
+      - admin 権限のユーザーでログインしていること
+      - users テーブルに admin2@example.com のレコードが存在しない
+  - id: 5e0d3b9c-27f8-4c1a-9e64-b8a2d0f3c504
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: 名前が空の場合400を返す
+    description: name に空文字を指定した場合、バリデーションエラーとなることを確認する。
+    request:
+      path: /users
+      headers:
+        Authorization: Bearer {管理者のトークン}
+        Content-Type: application/json
+      body:
+        name: ""
+        email: taro@example.com
+    expected:
+      - ステータスコードが 400 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          code: VALIDATION_ERROR
+          field: name
+    notes:
+      - admin 権限のユーザーでログインしていること
+  - id: a81f6c27-4d3e-4b90-8c15-3f7e9a2b6d05
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: メールアドレスの形式が不正な場合400を返す
+    description: email に @ を含まない文字列を指定した場合、バリデーションエラーとなることを確認する。
+    request:
+      path: /users
+      headers:
+        Authorization: Bearer {管理者のトークン}
+        Content-Type: application/json
+      body:
+        name: 山田 太郎
+        email: taro.example.com
+    expected:
+      - ステータスコードが 400 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          code: VALIDATION_ERROR
+          field: email
+    notes:
+      - admin 権限のユーザーでログインしていること
+  - id: 3f2a9c1e-84b2-4d7a-a189-98e3b56cf206
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: メールアドレスが重複している場合400を返す
+    description: 既に登録済みのメールアドレスで登録しようとした場合、エラーとなることを確認する。
+    request:
+      path: /users
+      headers:
+        Authorization: Bearer {管理者のトークン}
+        Content-Type: application/json
+      body:
+        name: 山田 太郎
+        email: taro@example.com
+    expected:
+      - ステータスコードが 400 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          code: VALIDATION_ERROR
+          message: リクエストパラメータが不正です
+      - users テーブルのレコード件数が変わっていない
+    notes:
+      - admin 権限のユーザーでログインしていること
+      - users テーブルに taro@example.com のレコードが存在する
+  - id: 6b4e8d02-f1a9-4c37-b2d5-0a9c7e3f1807
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: 未認証の場合401を返す
+    description: Authorization ヘッダーを付けずにリクエストした場合、認証エラーとなることを確認する。
+    request:
+      path: /users
+      headers:
+        Content-Type: application/json
+      body:
+        name: 山田 太郎
+        email: taro@example.com
+    expected:
+      - ステータスコードが 401 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          code: UNAUTHORIZED
+    notes:
+      - 未ログインの状態であること
+  - id: d9c2a5f7-3e81-4b06-9f4a-6c1b8e0d2a08
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: 閲覧者権限の場合403を返す
+    description: ユーザー登録権限を持たない viewer ロールでリクエストした場合、権限エラーとなることを確認する。
+    request:
+      path: /users
+      headers:
+        Authorization: Bearer {閲覧者のトークン}
+        Content-Type: application/json
+      body:
+        name: 山田 太郎
+        email: taro@example.com
+    expected:
+      - ステータスコードが 403 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          code: FORBIDDEN
+    notes:
+      - viewer 権限のユーザーでログインしていること
+  - id: 0e7f1b36-a5c4-4d92-8b07-e2f9c4a6b309
+    status: 有効
+    perspective: 正常
+    execution: 手動
+    title: 登録完了メールの文面が仕様どおりである
+    description: 登録後に送信されるメールの件名・本文・差出人が仕様書どおりであることを目視で確認する。
+    request:
+      path: /users
+      headers:
+        Authorization: Bearer {管理者のトークン}
+        Content-Type: application/json
+      body:
+        name: 確認 用子
+        email: check@example.com
+    expected:
+      - ステータスコードが 201 であること
+      - メールの件名が「【サンプル】会員登録が完了しました」である
+      - 本文の氏名・メールアドレスが登録内容と一致している
+      - 差出人が no-reply@example.com である
+    notes:
+      - admin 権限のユーザーでログインしていること
+      - users テーブルに check@example.com のレコードが存在しない
+  - id: 7a3d9e51-c8b4-4f2e-a6d0-1b5c3f8e9a10
+    status: 有効
+    perspective: 異常
+    execution: 自動
+    title: 旧会員システムへの連携に失敗した場合500を返す
+    description: 旧会員システムがエラーを返した場合、登録処理がロールバックされ 500 を返すことを確認する。
+    request:
+      path: /users
+      headers:
+        Authorization: Bearer {管理者のトークン}
+        Content-Type: application/json
+      body:
+        name: 山田 太郎
+        email: taro@example.com
+    expected:
+      - ステータスコードが 500 であること
+      - text: レスポンスボディが以下の内容であること
+        code:
+          code: LEGACY_SYNC_FAILED
+      - users テーブルにレコードが作成されていない
+    notes:
+      - admin 権限のユーザーでログインしていること
+      - text: 旧会員システム API の POST が 500 を返すようにモックする
+        code:
+          error: INTERNAL_ERROR
