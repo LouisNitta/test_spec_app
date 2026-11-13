@@ -307,10 +307,35 @@ body.specs-view #key-hint { display: block; }
 [data-field="steps"].changed, [data-field="expected"].changed, [data-field="notes"].changed { background: none; box-shadow: -8px 0 0 -6px #f0b35a; }
 .rcols.ui [data-field].changed { box-shadow: inset 2px 0 0 #f0b35a; }
 
-#savebar { position: fixed; left: 50%; bottom: 20px; transform: translate(-50%, 16px); display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 16px;
+#savebar { position: fixed; left: 50%; bottom: 20px; transform: translate(-50%, 16px); display: flex; flex-direction: column; padding: 8px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12); opacity: 0; pointer-events: none; transition: .15s; z-index: 5; }
 #savebar.show { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
-#savebar .count { font-size: 13px; color: var(--amber); white-space: nowrap; }
+#savebar .bar-row { display: flex; align-items: center; gap: 10px; }
+#savebar .count { font: inherit; font-size: 13px; color: var(--amber); white-space: nowrap; background: none; border: 0; padding: 6px 8px; border-radius: 6px; cursor: pointer; margin-right: auto; }
+#savebar .count:hover { background: var(--bg-hover); }
+#savebar .caret { margin-left: 6px; font-size: 8px; vertical-align: 1px; }
+#savebar .changes:empty { display: none; }
+#savebar .changes { width: min(560px, calc(100vw - 48px)); max-height: 40vh; overflow: auto; border-bottom: 1px solid var(--border); margin-bottom: 8px; padding-bottom: 6px; }
+.ch-title { font-size: 11.5px; color: var(--text-3); padding: 2px 8px 6px; }
+.ch-row { display: flex; align-items: center; gap: 8px; padding-right: 8px; }
+.ch-case { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; font: inherit; font-size: 13px; text-align: left; background: none; border: 0; padding: 6px 8px; border-radius: 6px; cursor: pointer; color: var(--text); }
+.ch-case:hover { background: var(--bg-hover); }
+.ch-case.static { cursor: default; }
+.ch-case.static:hover { background: none; }
+.ch-case .mono { color: var(--amber); }
+.ch-case .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ch-case .f { margin-left: auto; color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.ch-row .link { white-space: nowrap; }
+
+/* 項目ごとに変更を戻すボタン。変更した項目の右上に出す */
+[data-field] { position: relative; }
+.field-wrap { display: inline-flex; align-items: center; }
+.revert { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; padding: 0; display: grid; place-items: center; font-size: 12px; line-height: 1;
+  color: var(--amber); background: var(--bg); border: 1px solid #f0d3a6; border-radius: 5px; cursor: pointer; z-index: 1; }
+.revert:hover { background: var(--amber-bg); }
+.field-wrap > .revert { position: static; margin-left: 4px; }
+/* ボタンが文字に重ならないよう、右側に余白を取る */
+[data-field].changed:has(> .revert):not(.field-wrap) { padding-right: 26px; }
 #savebar .count.abn { color: var(--red); }
 body:has(#savebar.show) #key-hint { display: none; }
 
@@ -437,3 +462,37 @@ select[data-act="version"], select[data-act="diff-from"], select[data-act="diff-
 .dd-line > :not(.dd-k) { flex: 1; min-width: 0; }
 .diff-head select:not(.branch-select) { max-width: 260px; }
 .data-wrap { padding-top: 16px; }
+
+/* テストデータの編集 */
+.data-view.can-edit td.ecell { cursor: text; }
+.data-view.can-edit td.ecell:hover { box-shadow: inset 0 0 0 1px var(--border); }
+.data-table td { position: relative; }
+.data-table td.changed { background: var(--amber-bg) !important; padding-right: 30px; }
+.data-table td.editing { padding: 3px; min-width: 180px; background: var(--bg) !important; box-shadow: inset 0 0 0 2px var(--accent); }
+.cell-input { display: block; width: 100%; min-width: 160px; border: 0; outline: 0; resize: vertical; font: inherit; font-size: 12.5px; padding: 3px 6px; background: none; color: var(--text); }
+td.purpose .cell-input { min-width: 260px; font-family: var(--font); font-size: 13px; }
+.cell-tools { display: flex; gap: 4px; padding: 4px 4px 2px; }
+.cell-tools button { font: 11px var(--mono); border: 1px solid var(--border); background: var(--bg-subtle); border-radius: 4px; padding: 1px 6px; cursor: pointer; color: var(--text-2); white-space: nowrap; }
+.cell-tools button span { font-family: var(--font); margin-left: 4px; color: var(--text-3); }
+.cell-tools button:hover { background: var(--accent-bg); color: var(--accent); }
+.data-table .placeholder { color: var(--text-3); }
+.data-table td.idcell { white-space: nowrap; }
+.data-table td.idcell .type { display: block; margin: 4px 0 0 4px; font-size: 11px; }
+.row-actions { display: flex; gap: 10px; margin: 4px 0 0 4px; }
+.data-table tr.d-added td { background: var(--green-bg); }
+.data-table tr.d-added td.idcell { box-shadow: inset 3px 0 0 var(--green); }
+.data-table tr.d-changed td.idcell { box-shadow: inset 3px 0 0 #f0b35a; }
+.data-table tr.d-removed td { opacity: .55; text-decoration: line-through; }
+.data-table tr.d-removed td.idcell { opacity: 1; text-decoration: none; box-shadow: inset 3px 0 0 var(--red); }
+.data-table tr.flash td { animation: flash 1.2s; }
+@keyframes flash { from { background: var(--accent-bg); } }
+.use-chip { display: inline-flex; align-items: center; }
+.ref-x { visibility: hidden; border: 0; background: none; color: var(--text-3); padding: 0 3px; cursor: pointer; font-size: 12px; line-height: 1; }
+.ref-x:hover { color: var(--red); }
+.ref-add { margin: 4px 0 0; padding: 0; visibility: hidden; display: block; }
+tr:hover .ref-add { visibility: visible; }
+.ref-picker { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); min-width: 260px; }
+.ref-picker select { width: 100%; }
+.pick-actions { display: flex; align-items: center; gap: 10px; }
+.btn.small { height: auto; padding: 3px 10px; font-size: 12px; }
+.use-chip:hover .ref-x { visibility: visible; }

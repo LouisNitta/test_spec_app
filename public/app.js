@@ -90,9 +90,13 @@ const state = {
   diff: { from: null, to: null, a: null, b: null, onlyChanged: true, selectedId: null, showSame: false },
   // 一覧・通し読みで編集中の内容。保存するまで版には書き込まない
   draft: emptyDraft(),
+  changesOpen: false, // 画面下のバーの「変更の一覧」を開いているか
   // テストデータの定義（レベルごと）と、テストデータ画面で開いているテーブル
   dataDefs: {},
-  dataSel: null, // { level, table, caseId?, caseLabel? }
+  dataSel: null, // { level, table, branch, v, caseId?, caseLabel? }
+  dataView: null, // 選んだブランチ・版の時点のテーブル
+  dataDraft: null, // テストデータの編集中の内容
+  dataPicker: null, // 「使用しているケース」を追加する選択欄を開いているレコード { rec, name }
   // git のブランチ。編集できるのはチェックアウト中のブランチだけ
   branches: [],
   currentBranch: null,
@@ -155,32 +159,41 @@ async function loadData(level, force) {
   return state.dataDefs[level];
 }
 
+const dataTableUrl = (level, table, branch, v) => `/api/data/table?level=${level}&table=${q(table)}&branch=${q(branch)}&v=${q(v)}`;
+
+// ブランチと版を選んで、その時点のテーブルを表示する。省略したときは現在のブランチの最新
 // filter を渡すと、そのケースで使うレコードだけを表示する
-async function openData(level, table, filter = {}) {
-  await loadData(level, true);
-  state.dataSel = { level, table, ...filter };
+async function openData(level, table, { branch, v, ...filter } = {}) {
+  branch ??= state.currentBranch;
+  const versions = (await dataVersionsOf(level, table, branch, true)).map((x) => x.id);
+  if (!versions.length) return toast(`${branch} にはこのテーブルがありません`, true);
+  if (!versions.includes(v)) v = versions.at(-1);
+  state.dataView = await request(dataTableUrl(level, table, branch, v));
+  if (!hasDataDirty()) (state.dataDraft = null), (state.dataPicker = null);
+  state.dataSel = { level, table, branch, v, ...filter };
   state.view = 'data';
   render();
 }
 
-async function dataVersionsOf(level, table, branch) {
+async function dataVersionsOf(level, table, branch, force) {
   const key = `${level}|${table}|${branch}`;
-  state.dataVersionsBy[key] ??= await request(`/api/data/versions?level=${level}&table=${q(table)}&branch=${q(branch)}`);
+  if (force || !state.dataVersionsBy[key]) {
+    state.dataVersionsBy[key] = await request(`/api/data/versions?level=${level}&table=${q(table)}&branch=${q(branch)}`);
+  }
   return state.dataVersionsBy[key];
 }
 
-// ケースの差分と同じく、比較先は今のブランチの最新、比較元はその 1 つ前（別ブランチなら最新）
+// ケースの差分と同じく、比較先は一覧で見ているブランチ・版、比較元はその 1 つ前（別ブランチなら最新）
 async function openDataDiff({ fromBranch, from, toBranch, to } = {}) {
   const { level, table } = state.dataSel;
-  toBranch ??= state.currentBranch;
+  toBranch ??= state.dataSel.branch ?? state.currentBranch;
   fromBranch ??= toBranch;
   const toVs = (await dataVersionsOf(level, table, toBranch)).map((x) => x.id);
   const fromVs = (await dataVersionsOf(level, table, fromBranch)).map((x) => x.id);
   if (!toVs.includes(to)) to = toVs.at(-1);
   if (!fromVs.includes(from)) from = fromBranch === toBranch ? fromVs[Math.max(0, fromVs.indexOf(to) - 1)] : fromVs.at(-1);
   if (!from || !to) return toast('このブランチにはこのテーブルがありません', true);
-  const url = (v, b) => `/api/data/table?level=${level}&table=${q(table)}&branch=${q(b)}&v=${q(v)}`;
-  const [a, b] = await Promise.all([request(url(from, fromBranch)), request(url(to, toBranch))]);
+  const [a, b] = await Promise.all([request(dataTableUrl(level, table, fromBranch, from)), request(dataTableUrl(level, table, toBranch, to))]);
   Object.assign(state.dataDiff, { level, table, fromBranch, from, toBranch, to, a, b });
   state.view = 'data-diff';
   render();
@@ -267,7 +280,39 @@ function changedPaths(id) {
 const rawKeys = (id) => Object.keys(state.draft.raw).filter((k) => k.startsWith(`${id}|`));
 const isDirty = (id) => isNewCase(id) || changedPaths(id).length > 0 || rawKeys(id).length > 0;
 const dirtyIds = () => [...state.draft.cases.keys()].filter(isDirty);
-const hasDirty = () => dirtyIds().length > 0;
+const hasDirty = () => dirtyIds().length > 0 || (state.dataDraft != null && hasDataDirty());
+
+// 項目ごとに戻せるのは、並び順（no）と状態（有効・無効の切り替えボタンで戻せる）以外の項目
+const REVERTIBLE = (path) => path !== 'no' && path !== 'status';
+
+// 1つの項目だけ保存済みの内容に戻す。入力途中の JSON も捨てる
+function revertField(id, path) {
+  const original = toEditCase(originalCase(id));
+  set(ensureDraft(id), path, structuredClone(get(original, path)));
+  delete state.draft.raw[`${id}|${path}`];
+  dropRaw(id, path);
+}
+
+// ケースの変更をすべて戻す。追加したケースは追加を取り消す。並べ替えていたら番号だけは今の並び順に合わせる
+function revertCase(id) {
+  const d = state.draft;
+  d.cases.delete(id);
+  rawKeys(id).forEach((k) => delete d.raw[k]);
+  if (isNewCase(id)) {
+    d.newIds = d.newIds.filter((x) => x !== id);
+    if (d.order) d.order = d.order.filter((x) => x !== id);
+    if (state.selectedId === id) state.selectedId = null;
+  }
+  if (d.order) reorderCases(d.order);
+}
+
+// 並び順だけを元に戻す
+function revertOrder() {
+  state.draft.order = null;
+  reorderCases(defaultOrder());
+  [...state.draft.cases.keys()].forEach((id) => isDirty(id) || state.draft.cases.delete(id));
+}
+const isReordered = () => !!state.draft.order;
 
 function newCaseTemplate() {
   const nos = currentCases().map((c) => c.no);
@@ -608,7 +653,8 @@ function enumSelect(c, key) {
   const opts = Object.entries(LABEL[key])
     .map(([v, l]) => `<option value="${v}" ${c[key] === v ? 'selected' : ''}>${l}</option>`)
     .join('');
-  return `<select class="inline-select pill ${cls}" data-edit="${key}" data-kind="enum" data-field="${key}">${opts}</select>`;
+  // select の中には戻すボタンを置けないので、data-field は外側の span に付ける
+  return `<span class="field-wrap" data-field="${key}"><select class="inline-select pill ${cls}" data-edit="${key}" data-kind="enum">${opts}</select></span>`;
 }
 const caseMeta = (c) =>
   `<span class="case-meta">${enumSelect(c, 'perspective')}${enumSelect(c, 'execution')}</span>`;
@@ -683,59 +729,222 @@ function cellHtml(v) {
   return esc(v).replaceAll('\n', '<br>');
 }
 
-function renderData() {
-  const { level, table, caseId, caseLabel } = state.dataSel;
-  const defs = state.dataDefs[level];
-  const t = defs?.tables.find((x) => x.table === table);
-  if (!t) return '<div class="muted" style="padding:40px">テーブルが見つかりません</div>';
-  const unused = t.records.filter((r) => !r.cases.length).length;
-  const missing = t.records.reduce((n, r) => n + r.refs.filter((x) => x.missing).length, 0);
-  const records = caseId ? t.records.filter((r) => r.refs.some((x) => x.id === caseId)) : t.records;
+/* ---------- test data editing ---------- */
 
-  // 使用しているケースは API・画面ごとにまとめる。該当するケースがない番号は赤で出す
+// 編集中のテーブル。rows は表示順のレコードで、追加したものに _new、削除したものに _deleted を付ける。保存するまでファイルには書き込まない
+const plainRec = (r) => ({ id: r.id, purpose: r.purpose, cases: [...r.cases], values: { ...r.values } });
+const canEditData = () => !!state.dataView?.etag;
+const origRec = (id) => state.dataView.records.find((r) => r.id === id);
+const dataRows = () => state.dataDraft?.rows ?? state.dataView.records.map(plainRec);
+const dataRow = (id) => state.dataDraft.rows.find((r) => r.id === id);
+function ensureDataDraft() {
+  state.dataDraft ??= { rows: state.dataView.records.map(plainRec) };
+  return state.dataDraft;
+}
+// 変更がなくなったら下書きを捨てる
+function settleDataDraft() {
+  if (!dataDirtyRows().length) state.dataDraft = null;
+}
+
+// 意図は __purpose、使用しているケースは __cases、値のセルはカラム名で表す
+const PURPOSE = '__purpose';
+const CASES = '__cases';
+const cellOf = (r, col) => (col === PURPOSE ? r.purpose : col === CASES ? r.cases.join(' ') : (r.values[col] ?? ''));
+function recChange(r) {
+  if (r._new) return { type: 'added', cols: [] };
+  if (r._deleted) return { type: 'removed', cols: [] };
+  const o = origRec(r.id);
+  const cols = [PURPOSE, CASES, ...state.dataView.columns].filter((c) => cellOf(o, c) !== cellOf(r, c));
+  return cols.length ? { type: 'changed', cols } : null;
+}
+const dataDirtyRows = () => (state.dataDraft?.rows ?? []).filter(recChange);
+const hasDataDirty = () => dataDirtyRows().length > 0;
+const colLabel = (col) => (col === PURPOSE ? '意図' : col === CASES ? '使用しているケース' : col);
+
+// cases 列の「名前#番号」を、同じ時点のケースの一覧から解決する（名前が重複しているときはサーバーと同じく後のものを使う）
+function resolveRef(ref) {
+  const m = /^(.+)#(\d+)$/.exec(ref);
+  const spec = m && state.dataView.catalog.findLast((x) => x.name === m[1]);
+  const c = spec?.cases[Number(m[2]) - 1];
+  return c ? { ref, api: spec.api, name: spec.name, no: c.no, id: c.id, title: c.title, status: c.status } : { ref, missing: true };
+}
+// 絞り込み中のケースを cases 列の書き方にする
+function refOfCase(caseId) {
+  for (const spec of state.dataView.catalog) {
+    const c = spec.cases.find((x) => x.id === caseId);
+    if (c) return `${spec.name}#${c.no}`;
+  }
+  return null;
+}
+
+function setCell(id, col, value) {
+  const r = dataRow(id);
+  if (col === PURPOSE) r.purpose = value;
+  else r.values[col] = value;
+}
+function revertDataCell(id, col) {
+  const r = dataRow(id);
+  const o = origRec(id);
+  if (col === PURPOSE) r.purpose = o.purpose;
+  else if (col === CASES) r.cases = [...o.cases];
+  else r.values[col] = o.values[col];
+  settleDataDraft();
+}
+function revertDataRec(id) {
+  const rows = state.dataDraft.rows;
+  const i = rows.findIndex((r) => r.id === id);
+  if (rows[i]._new) rows.splice(i, 1);
+  else rows[i] = plainRec(origRec(id));
+  settleDataDraft();
+}
+function newDataRec(base) {
+  const { caseId } = state.dataSel;
+  const ref = caseId && refOfCase(caseId);
+  return base
+    ? { ...plainRec(base), id: crypto.randomUUID(), _new: true }
+    : { id: crypto.randomUUID(), purpose: '', cases: ref ? [ref] : [], values: Object.fromEntries(state.dataView.columns.map((c) => [c, '-'])), _new: true };
+}
+
+async function saveDataDraft() {
+  const { level, table, branch, caseId, caseLabel } = state.dataSel;
+  const records = state.dataDraft.rows.filter((r) => !r._deleted).map(({ _new, _deleted, ...r }) => r);
+  try {
+    await request(`/api/data/table?level=${level}&table=${q(table)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ etag: state.dataView.etag, records }),
+    });
+    state.dataDraft = null;
+    state.dataPicker = null;
+    state.tree = await request('/api/tree');
+    await loadData(level, true);
+    await openData(level, table, { branch, caseId, caseLabel });
+    toast('保存しました。版として残すには git でコミットしてください');
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// セルの入力欄。値のセルには「-」「NULL」「空文字」をワンクリックで入れるボタンを付ける
+function openCellEditor(td) {
+  if (td.classList.contains('editing')) return;
+  const { rec, col } = td.dataset;
+  const value = cellOf(dataRows().find((r) => r.id === rec), col);
+  td.classList.add('editing');
+  td.innerHTML = `<textarea class="cell-input" rows="${Math.max(1, value.split('\n').length)}">${esc(value)}</textarea>${
+    col === PURPOSE
+      ? ''
+      : `<div class="cell-tools"><button type="button" data-set="-">-<span>任意</span></button><button type="button" data-set="NULL">NULL</button><button type="button" data-set="">""<span>空文字</span></button></div>`
+  }`;
+  const ta = td.querySelector('textarea');
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+function commitCellEditor(td, value, cancel = false) {
+  if (!td?.classList.contains('editing')) return;
+  td.classList.remove('editing');
+  const { rec, col } = td.dataset;
+  if (!cancel && value !== cellOf(dataRows().find((r) => r.id === rec), col)) {
+    ensureDataDraft();
+    setCell(rec, col, value);
+    settleDataDraft();
+  }
+  render();
+}
+
+function renderData() {
+  const { level, table, branch, v, caseId, caseLabel } = state.dataSel;
+  const t = state.dataView;
+  if (!t) return '<div class="muted" style="padding:40px">テーブルが見つかりません</div>';
+  const versions = state.dataVersionsBy[`${level}|${table}|${branch}`] ?? [];
+  const isLatest = v === versions.at(-1)?.id;
+  const isPast = !isLatest || (state.currentBranch && branch !== state.currentBranch);
+  const editable = canEditData();
+  const all = dataRows().map((r) => ({ ...r, refs: r.cases.map((ref, i) => ({ ...resolveRef(ref), i })), change: state.dataDraft ? recChange(r) : null }));
+  const live = all.filter((r) => !r._deleted);
+  const unused = live.filter((r) => !r.cases.length).length;
+  const missing = live.reduce((n, r) => n + r.refs.filter((x) => x.missing).length, 0);
+  const records = caseId ? all.filter((r) => r.refs.some((x) => x.id === caseId)) : all;
+
+  const revertBtn = (r, col) =>
+    `<button type="button" class="revert" data-act="data-revert-cell" data-rec="${esc(r.id)}" data-col="${esc(col)}" title="このセルの変更を戻す">↺</button>`;
+  const isChanged = (r, col) => r.change?.type === 'changed' && r.change.cols.includes(col);
+  const cellAttrs = (r, col, cls) => {
+    const can = editable && !r._deleted;
+    return `class="${cls} ${can ? 'ecell' : ''} ${isChanged(r, col) ? 'changed' : ''}" data-rec="${esc(r.id)}" data-col="${esc(col)}"`;
+  };
+
+  // 使用しているケースは API・画面ごとにまとめる。該当するケースがない番号は赤で出す。編集中は × で外せる
   const usageHtml = (r) => {
-    if (!r.refs.length) return '<span class="unused">未使用</span>';
-    const groups = Map.groupBy(r.refs, (x) => (x.missing ? '' : x.name));
-    return [...groups]
+    const can = editable && !r._deleted;
+    const x = (ref) => (can ? `<button type="button" class="ref-x" data-act="data-ref-remove" data-rec="${esc(r.id)}" data-index="${ref.i}" aria-label="外す">×</button>` : '');
+    const groups = Map.groupBy(r.refs, (ref) => (ref.missing ? '' : ref.name));
+    const list = [...groups]
       .map(([name, xs]) =>
         name
           ? `<div class="use"><span class="use-name">${esc(name)}</span>${xs
               .map(
-                (x) => `<button class="use-case ${x.status === '無効' ? 'excluded' : ''} ${x.id === caseId ? 'hit' : ''}" data-act="open-case" data-api="${esc(x.api)}" data-level="${level}" data-id="${x.id}" title="${esc(x.title)}">#${x.no}</button>`,
+                (ref) => `<span class="use-chip"><button class="use-case ${ref.status === '無効' ? 'excluded' : ''} ${ref.id === caseId ? 'hit' : ''}" data-act="open-case" data-api="${esc(ref.api)}" data-level="${level}" data-id="${ref.id}" title="${esc(ref.title)}">#${ref.no}</button>${x(ref)}</span>`,
               )
               .join('')}</div>`
-          : `<div class="use">${xs.map((x) => `<span class="use-missing" title="該当するケースがありません">${esc(x.ref)}</span>`).join('')}</div>`,
+          : `<div class="use">${xs.map((ref) => `<span class="use-chip"><span class="use-missing" title="該当するケースがありません">${esc(ref.ref)}</span>${x(ref)}</span>`).join('')}</div>`,
       )
       .join('');
+    const empty = r.refs.length ? '' : '<span class="unused">未使用</span>';
+    if (!can) return list || empty;
+    const p = state.dataPicker;
+    if (p?.rec === r.id) {
+      const spec = t.catalog.find((s) => s.name === p.name) ?? t.catalog[0];
+      return `${list}<div class="ref-picker">
+        <select data-act="data-pick-name">${t.catalog.map((s) => `<option ${s === spec ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+        <select class="pick-no">${(spec?.cases ?? []).map((c) => `<option value="${c.no}">#${c.no} ${esc(c.title)}${c.status === '無効' ? '（無効）' : ''}</option>`).join('')}</select>
+        <div class="pick-actions"><button type="button" class="btn small primary" data-act="data-pick-ok" data-rec="${esc(r.id)}">追加</button><button type="button" class="link" data-act="data-pick-cancel">キャンセル</button></div>
+      </div>`;
+    }
+    return `${list || empty}<button type="button" class="ctl-add ref-add" data-act="data-ref-add" data-rec="${esc(r.id)}">+ ケース</button>`;
+  };
+
+  const rowActions = (r) => {
+    if (!editable) return '';
+    const btn = (act, label) => `<button type="button" class="link" data-act="${act}" data-id="${esc(r.id)}">${label}</button>`;
+    if (r._deleted) return `<div class="row-actions">${btn('data-revert-rec', '削除を取り消す')}</div>`;
+    return `<div class="row-actions">${btn('data-dup', '複製')}${btn('data-del', r._new ? '追加を取り消す' : '削除')}</div>`;
   };
 
   const rows = records
     .map(
-      (r) => `<tr>
-        <td><button class="uuid" data-act="copy-uuid" data-id="${esc(r.id)}" title="${esc(r.id)}（クリックでコピー）">${esc(r.id.slice(0, 8))}</button></td>
-        <td class="purpose">${esc(r.purpose)}</td>
-        <td class="usage">${usageHtml(r)}</td>
-        ${t.columns.map((col) => `<td class="mono val">${cellHtml(r.values[col])}</td>`).join('')}
+      (r) => `<tr data-rec="${esc(r.id)}" class="${r.change ? `d-${r.change.type}` : ''}">
+        <td class="idcell"><button class="uuid" data-act="copy-uuid" data-id="${esc(r.id)}" title="${esc(r.id)}（クリックでコピー）">${esc(r.id.slice(0, 8))}</button>${
+          r.change ? `<span class="type ${r.change.type}">${DATA_TYPE_LABEL[r.change.type]}</span>` : ''
+        }${rowActions(r)}</td>
+        <td ${cellAttrs(r, PURPOSE, 'purpose')}>${r.purpose ? esc(r.purpose) : editable && !r._deleted ? '<span class="placeholder">（意図を入力）</span>' : ''}${isChanged(r, PURPOSE) ? revertBtn(r, PURPOSE) : ''}</td>
+        <td class="usage ${isChanged(r, CASES) ? 'changed' : ''}">${usageHtml(r)}${isChanged(r, CASES) ? revertBtn(r, CASES) : ''}</td>
+        ${t.columns.map((col) => `<td ${cellAttrs(r, col, 'mono val')}>${cellHtml(r.values[col] ?? '')}${isChanged(r, col) ? revertBtn(r, col) : ''}</td>`).join('')}
       </tr>`,
     )
     .join('');
 
   const warn = [
-    defs.duplicates.length ? `同じ名前のAPI・画面があるため、番号で区別できません：${defs.duplicates.map(esc).join('、')}` : '',
+    t.duplicates.length ? `同じ名前のAPI・画面があるため、番号で区別できません：${t.duplicates.map(esc).join('、')}` : '',
     missing ? `該当するケースがない番号が ${missing} 件あります（赤字）` : '',
   ].filter(Boolean);
 
-  return `<div class="data-view">
+  return `<div class="data-view ${editable ? 'can-edit' : ''}">
     <div class="specs-head">
       <div class="pane-head">
         <div class="crumb">テストデータ<span class="sep">/</span><span class="mono">${esc(table)}</span><span class="sep">/</span>${LABEL.level[level]}</div>
-        <span class="muted mono file">test-data/${level}/${esc(table)}.csv</span>
+        ${branchSelect('data-branch', branch)}
+        <select data-act="data-version">${versions
+          .map((x) => `<option value="${x.id}" ${x.id === v ? 'selected' : ''}>${esc(x.label)}${x === versions.at(-1) ? ' · 最新' : ''}</option>`)
+          .join('')}</select>
         <div class="spacer"></div>
+        <button class="btn primary" data-act="data-add" ${editable ? '' : 'disabled'}>レコードを追加</button>
         ${state.branches.length ? dataModeSwitch() : ''}
       </div>
+      ${isPast ? '<div class="note">選んだブランチ・版の時点の内容です。使用しているケースも、同じ時点のケースで表示しています。編集できるのは現在のブランチの最新だけです。</div>' : ''}
       ${warn.map((w) => `<div class="note warn">${w}</div>`).join('')}
       <div class="toolbar">
-        <div class="summary">${t.records.length}件 · ${t.columns.length}カラム${unused ? ` · <span class="unused">未使用 ${unused}</span>` : ''}</div>
+        <div class="summary">${live.length}件 · ${t.columns.length}カラム${unused ? ` · <span class="unused">未使用 ${unused}</span>` : ''}</div>
         ${caseId ? `<span class="data-filter">${esc(caseLabel)} で使うレコード（${records.length}件）<button class="link" data-act="clear-data-filter">解除</button></span>` : ''}
         <span class="legend"><span class="lg-title">セルの見方</span>
           <span class="lg"><code class="any">-</code>どんな値でもよい</span>
@@ -1017,7 +1226,14 @@ function syncDirty(id) {
   const title = viewCase(id).title || '（未入力）';
   document.querySelectorAll(`[data-case="${id}"]`).forEach((sec) => {
     sec.classList.toggle('dirty', dirty);
-    sec.querySelectorAll('[data-field]').forEach((f) => f.classList.toggle('changed', paths.includes(f.dataset.field)));
+    sec.querySelectorAll('[data-field]').forEach((f) => {
+      const changed = paths.includes(f.dataset.field);
+      f.classList.toggle('changed', changed);
+      const btn = f.querySelector(':scope > .revert');
+      if (changed && REVERTIBLE(f.dataset.field) && canEdit()) {
+        if (!btn) f.insertAdjacentHTML('beforeend', `<button type="button" class="revert" data-act="revert-field" data-path="${f.dataset.field}" title="この項目の変更を戻す">↺</button>`);
+      } else btn?.remove();
+    });
   });
   document.querySelectorAll(`.toc-item[data-id="${id}"], tr[data-id="${id}"]`).forEach((el) => {
     el.classList.toggle('dirty', dirty);
@@ -1029,23 +1245,74 @@ function syncDirty(id) {
 
 function updateSaveBar() {
   const bar = $('#savebar');
-  const n = state.view === 'specs' ? dirtyIds().length : 0;
+  const isData = state.view === 'data';
+  const ids = state.view === 'specs' ? dirtyIds() : [];
+  const dataIds = isData && state.dataDraft ? dataDirtyRows().map((r) => r.id) : [];
+  const n = isData ? dataIds.length : ids.length;
   bar.classList.toggle('show', n > 0);
   if (!n) {
     bar.innerHTML = '';
+    state.changesOpen = false;
     return;
   }
   if (!bar.querySelector('#save-btn')) {
-    bar.innerHTML = `<span class="count"></span>
-      <button class="btn ghost" data-act="discard">破棄</button>
-      <button class="btn primary" data-act="save" id="save-btn">ファイルに保存</button>`;
+    bar.innerHTML = `<div class="changes"></div>
+      <div class="bar-row">
+        <button class="count" data-act="toggle-changes"></button>
+        <button class="btn ghost" data-act="discard">すべて破棄</button>
+        <button class="btn primary" data-act="save" id="save-btn">ファイルに保存</button>
+      </div>`;
   }
-  const invalid = Object.keys(state.draft.raw).length;
+  const invalid = isData ? 0 : Object.keys(state.draft.raw).length;
   const count = bar.querySelector('.count');
-  count.textContent = invalid ? `JSONの形式が不正です (${invalid})` : `未保存の変更 ${n}ケース`;
+  count.innerHTML = `${invalid ? `JSONの形式が不正です (${invalid})` : `未保存の変更 ${n}${isData ? '件' : 'ケース'}`}<span class="caret">${state.changesOpen ? '▼' : '▲'}</span>`;
   count.classList.toggle('abn', invalid > 0);
-  const save = bar.querySelector('#save-btn');
-  save.disabled = invalid > 0;
+  bar.querySelector('#save-btn').disabled = invalid > 0;
+  bar.querySelector('.changes').innerHTML = state.changesOpen ? (isData ? dataChangesHtml() : changesHtml(ids)) : '';
+}
+
+// テストデータの変更の一覧。レコードへの移動と、レコードごとの取り消しができる
+function dataChangesHtml() {
+  const rows = dataDirtyRows()
+    .map((r) => {
+      const { type, cols } = recChange(r);
+      const what = type === 'added' ? '新規追加' : type === 'removed' ? '削除' : cols.map(colLabel).join('、');
+      const label = type === 'added' ? '追加を取り消す' : type === 'removed' ? '削除を取り消す' : '戻す';
+      return `<div class="ch-row">
+        <button class="ch-case" data-act="data-jump" data-id="${esc(r.id)}"><span class="mono">${esc(r.id.slice(0, 8))}</span><span class="t">${esc(r.purpose || '（意図なし）')}</span><span class="f">${esc(what)}</span></button>
+        <button class="link" data-act="data-revert-rec" data-id="${esc(r.id)}">${label}</button>
+      </div>`;
+    })
+    .join('');
+  return `<div class="ch-title">変更の一覧</div>${rows}`;
+}
+
+// 画面下のバーから開く変更の一覧。ケースへの移動と、ケースごと・並び順の取り消しができる
+function changesHtml(ids) {
+  const fields = fieldsOf(state.spec);
+  const rows = ids
+    .map(viewCase)
+    .sort((a, b) => a.no - b.no)
+    .map((c) => {
+      const what = isNewCase(c.id)
+        ? '新規追加'
+        : changedPaths(c.id)
+            .filter((p) => p !== 'no')
+            .map((p) => shortLabel(fields.find((f) => f.path === p)))
+            .join('、') || (rawKeys(c.id).length ? '入力途中のJSON' : '並び順');
+      return `<div class="ch-row">
+        <button class="ch-case" data-act="jump-case" data-id="${c.id}"><span class="mono">#${c.no}</span><span class="t">${esc(c.title || '（未入力）')}</span><span class="f">${esc(what)}</span></button>
+        ${
+          // 番号が変わっただけのケースは、上の「並び順」の行で戻す
+          what === '並び順' ? '' : `<button class="link" data-act="revert-case" data-id="${c.id}">${isNewCase(c.id) ? '追加を取り消す' : '戻す'}</button>`
+        }
+      </div>`;
+    })
+    .join('');
+  const order = isReordered()
+    ? `<div class="ch-row"><span class="ch-case static"><span class="f">ケースの並び順を変更</span></span><button class="link" data-act="revert-order">戻す</button></div>`
+    : '';
+  return `<div class="ch-title">変更の一覧</div>${order}${rows}`;
 }
 
 // 項目の追加・削除など、ケースの構造が変わる操作。全体を描き直してから入力欄を開く
@@ -1255,7 +1522,11 @@ function toast(message, error = false) {
 
 document.addEventListener('click', async (e) => {
   const editable = e.target.closest('.editable');
-  if (editable) return openEditor(editable);
+  if (editable && !e.target.closest('.revert')) return openEditor(editable);
+  const setBtn = e.target.closest('.cell-tools [data-set]');
+  if (setBtn) return commitCellEditor(setBtn.closest('td'), setBtn.dataset.set);
+  const ecell = e.target.closest('td.ecell');
+  if (ecell && !e.target.closest('button, a, select, textarea')) return openCellEditor(ecell);
   const el = e.target.closest('[data-act]');
   if (!el || el.tagName === 'SELECT' || el.type === 'checkbox') return;
   const { id, path } = el.dataset;
@@ -1270,7 +1541,8 @@ document.addEventListener('click', async (e) => {
     }
     case 'data-mode':
       if (el.dataset.viewTo === state.view) return;
-      if (el.dataset.viewTo === 'data-diff') return openDataDiff();
+      if (blockedByDraft()) return;
+      if (el.dataset.viewTo === 'data-diff') return openDataDiff({ to: state.dataSel.v });
       state.view = 'data';
       return render();
     case 'open-case-data': {
@@ -1278,9 +1550,12 @@ document.addEventListener('click', async (e) => {
       const c = viewCase(el.dataset.id);
       return openData(state.level, el.dataset.table, { caseId: c.id, caseLabel: `${state.spec.meta.name} #${c.no} ${c.title}` });
     }
-    case 'clear-data-filter':
-      return openData(state.dataSel.level, state.dataSel.table);
+    case 'clear-data-filter': {
+      const { level, table, branch, v } = state.dataSel;
+      return openData(level, table, { branch, v });
+    }
     case 'open-case':
+      if (blockedByDraft()) return;
       await selectSpec(el.dataset.api, el.dataset.level);
       state.mode = 'list';
       state.selectedId = id;
@@ -1345,12 +1620,93 @@ document.addEventListener('click', async (e) => {
     case 'remove-item':
       dropRaw(caseId, path);
       return structural(caseId, (c) => get(c, path).splice(Number(el.dataset.index), 1));
+    case 'revert-field':
+      revertField(caseId, path);
+      return render();
+    case 'revert-case':
+      revertCase(id);
+      return render();
+    case 'revert-order':
+      revertOrder();
+      return render();
+    case 'toggle-changes':
+      state.changesOpen = !state.changesOpen;
+      return updateSaveBar();
+    case 'jump-case':
+      state.selectedId = id;
+      render();
+      if (state.mode === 'read') scrollToCase(id);
+      else $('tr.selected')?.scrollIntoView({ block: 'nearest' });
+      return;
     case 'discard':
-      state.draft = emptyDraft();
+      if (state.view === 'data') (state.dataDraft = null), (state.dataPicker = null);
+      else state.draft = emptyDraft();
       render();
       return toast('変更を破棄しました');
     case 'save':
-      return save();
+      return state.view === 'data' ? saveDataDraft() : save();
+    case 'data-add': {
+      const rec = newDataRec();
+      ensureDataDraft().rows.push(rec);
+      render();
+      const td = $(`tr[data-rec="${rec.id}"] td.purpose`);
+      td?.scrollIntoView({ block: 'nearest' });
+      return td && openCellEditor(td);
+    }
+    case 'data-dup': {
+      const rows = ensureDataDraft().rows;
+      const i = rows.findIndex((r) => r.id === id);
+      const rec = newDataRec(rows[i]);
+      rows.splice(i + 1, 0, rec);
+      render();
+      const td = $(`tr[data-rec="${rec.id}"] td.purpose`);
+      return td && openCellEditor(td);
+    }
+    case 'data-del': {
+      const rows = ensureDataDraft().rows;
+      const i = rows.findIndex((r) => r.id === id);
+      if (rows[i]._new) rows.splice(i, 1);
+      else rows[i]._deleted = true;
+      settleDataDraft();
+      return render();
+    }
+    case 'data-revert-rec':
+      revertDataRec(id);
+      return render();
+    case 'data-revert-cell':
+      revertDataCell(el.dataset.rec, el.dataset.col);
+      return render();
+    case 'data-ref-remove':
+      ensureDataDraft();
+      dataRow(el.dataset.rec).cases.splice(Number(el.dataset.index), 1);
+      settleDataDraft();
+      return render();
+    case 'data-ref-add':
+      state.dataPicker = { rec: el.dataset.rec, name: state.dataView.catalog[0]?.name };
+      return render();
+    case 'data-pick-cancel':
+      state.dataPicker = null;
+      return render();
+    case 'data-pick-ok': {
+      const picker = el.closest('.ref-picker');
+      const name = picker.querySelector('[data-act="data-pick-name"]').value;
+      const no = picker.querySelector('.pick-no').value;
+      state.dataPicker = null;
+      if (!no) return render();
+      ensureDataDraft();
+      const r = dataRow(el.dataset.rec);
+      const ref = `${name}#${no}`;
+      if (!r.cases.includes(ref)) r.cases.push(ref);
+      settleDataDraft();
+      return render();
+    }
+    case 'data-jump': {
+      const tr = $(`tr[data-rec="${id}"]`);
+      if (!tr) return toast('絞り込みで非表示になっています', true);
+      tr.scrollIntoView({ block: 'center' });
+      tr.classList.add('flash');
+      return setTimeout(() => tr.classList.remove('flash'), 1200);
+    }
     case 'diff-select':
       state.diff.selectedId = id;
       state.diff.showSame = false;
@@ -1361,8 +1717,17 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+// 「-」「NULL」などのボタンで入力欄のフォーカスが外れないようにする
+document.addEventListener('mousedown', (e) => {
+  if (e.target.closest('.cell-tools')) e.preventDefault();
+});
+
 document.addEventListener('focusout', (e) => {
   if (e.target.classList?.contains('inline-input')) commitEditor(e.target.closest('.editable'));
+  // 「-」「NULL」などのボタンを押したときは、ボタンの方で確定する
+  if (e.target.classList?.contains('cell-input') && !suppressCommit && !e.relatedTarget?.closest?.('.cell-tools')) {
+    commitCellEditor(e.target.closest('td'), e.target.value);
+  }
 });
 
 document.addEventListener('change', async (e) => {
@@ -1391,6 +1756,19 @@ document.addEventListener('change', async (e) => {
       return openDiff({ ...state.diff, fromBranch: el.value, from: undefined });
     case 'diff-to-branch':
       return openDiff({ ...state.diff, toBranch: el.value, to: undefined });
+    case 'data-pick-name':
+      state.dataPicker.name = el.value;
+      return render();
+    case 'data-branch': {
+      if (blockedByDraft()) return render();
+      const { level, table, caseId, caseLabel } = state.dataSel;
+      return openData(level, table, { branch: el.value, caseId, caseLabel });
+    }
+    case 'data-version': {
+      if (blockedByDraft()) return render();
+      const { level, table, branch, caseId, caseLabel } = state.dataSel;
+      return openData(level, table, { branch, v: el.value, caseId, caseLabel });
+    }
     case 'data-diff-from':
       return openDataDiff({ ...state.dataDiff, from: el.value });
     case 'data-diff-to':
@@ -1424,6 +1802,18 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('keydown', (e) => {
   const el = e.target;
+  // テストデータのセル。Enter で確定、Shift+Enter で改行、Esc で取り消し
+  if (el.classList?.contains('cell-input')) {
+    if (e.isComposing) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      commitCellEditor(el.closest('td'), el.value, true);
+    } else if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      commitCellEditor(el.closest('td'), el.value);
+    }
+    return;
+  }
   if (el.classList?.contains('inline-input')) {
     if (e.isComposing) return;
     const editable = el.closest('.editable');

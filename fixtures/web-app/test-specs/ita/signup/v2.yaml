@@ -1,7 +1,7 @@
 meta:
   type: ui
   name: 会員登録画面
-updatedAt: "2026-10-17"
+updatedAt: '2026-10-17'
 changes: 重複時のエラー表示を画面上部に変更、利用規約未同意のケースを追加
 cases:
   - id: 1b6f3c2a-8e4d-4a71-9c05-d2e7f8a3b101

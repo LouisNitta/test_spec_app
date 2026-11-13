@@ -3,7 +3,7 @@ meta:
   name: ユーザー取得API
   method: GET
   path: /users/{id}
-updatedAt: "2026-10-24"
+updatedAt: '2026-10-24'
 changes: 初版作成
 cases:
   - id: 2e7d4b19-5a3c-4f86-9e1b-b8c6d2a4f401
@@ -19,7 +19,7 @@ cases:
       - ステータスコードが 200 であること
       - text: レスポンスボディが以下の内容であること
         code:
-          id: "{DBに存在するユーザーのUUIDv4}"
+          id: '{DBに存在するユーザーのUUIDv4}'
           name: 佐藤 花子
           email: hanako@example.com
     notes:

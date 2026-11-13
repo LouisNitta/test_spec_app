@@ -1,7 +1,7 @@
 meta:
   type: ui
   name: 会員登録画面
-updatedAt: "2026-10-10"
+updatedAt: '2026-10-10'
 changes: 初版作成
 cases:
   - id: 1b6f3c2a-8e4d-4a71-9c05-d2e7f8a3b101

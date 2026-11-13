@@ -3,7 +3,7 @@ meta:
   name: ユーザー登録API
   method: POST
   path: /users
-updatedAt: "2026-10-10"
+updatedAt: '2026-10-10'
 changes: 初版作成
 cases:
   - id: 8c1d2f4a-6b3e-4f7a-9d21-5e8b7c0a1f01
@@ -46,7 +46,7 @@ cases:
         name: 佐藤 花子
         email: hanako@example.com
         phone: 090-1234-5678
-        birthday: "1995-04-01"
+        birthday: '1995-04-01'
     expected:
       - ステータスコードが 201 であること
       - text: レスポンスボディが以下の内容であること
@@ -54,7 +54,7 @@ cases:
           name: 佐藤 花子
           email: hanako@example.com
           phone: 090-1234-5678
-          birthday: "1995-04-01"
+          birthday: '1995-04-01'
           role: member
       - users テーブルの phone, birthday に値が保存されている
     notes:
@@ -96,7 +96,7 @@ cases:
         Authorization: Bearer {管理者のトークン}
         Content-Type: application/json
       body:
-        name: ""
+        name: ''
         email: taro@example.com
     expected:
       - ステータスコードが 400 であること

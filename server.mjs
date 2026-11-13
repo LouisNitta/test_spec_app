@@ -108,7 +108,7 @@ async function getVersions(file, branch) {
   return versions;
 }
 
-// 指定した版のファイルの中身。作業中のファイルと同じ内容になる版は working: true を返す
+// 指定した版のファイルの中身。作業中のファイルと同じ内容になる版は working: true を返す。コミットの版は hash も返す
 async function readAt(file, v, branch) {
   if (v === WORKING) return { working: true, text: await fs.readFile(file, 'utf8') };
   const current = await currentBranch();
@@ -119,7 +119,7 @@ async function readAt(file, v, branch) {
   }
   const c = commits.find((x) => x.hash === v);
   if (!c) throw Object.assign(new Error('指定された版が見つかりません'), { status: 404 });
-  return { working: false, text: await git('show', `${c.hash}:${c.path}`) };
+  return { working: false, hash: c.hash, text: await git('show', `${c.hash}:${c.path}`) };
 }
 
 async function readWorking(api, level) {
@@ -196,12 +196,23 @@ async function getDataTree() {
   return [...byTable.values()].sort((a, b) => a.table.localeCompare(b.table));
 }
 
+// ある時点のレベル内のケース YAML。hash がなければ作業中のファイル、あればそのコミットの時点のもの
+async function specFilesAt(level, hash) {
+  if (!hash) {
+    const files = await filesOf(path.join(specsDir, level), '.yaml');
+    return Promise.all(files.map(async (f) => ({ f, text: await fs.readFile(path.join(specsDir, level, f), 'utf8') })));
+  }
+  const out = await git('ls-tree', '--name-only', hash, `./${level}/`);
+  const files = out.split('\n').map((l) => path.basename(l)).filter((f) => f.endsWith('.yaml') && NAME.test(f)).sort();
+  return Promise.all(files.map(async (f) => ({ f, text: await git('show', `${hash}:./${level}/${f}`) })));
+}
+
 // レベル内のケースを「名前#番号」で引けるようにする。名前が重複していると区別できないので一覧で返す
-async function caseIndex(level) {
+async function caseIndex(level, hash) {
   const byName = new Map();
   const duplicates = new Set();
-  for (const f of await filesOf(path.join(specsDir, level), '.yaml')) {
-    const spec = yaml.load(await fs.readFile(path.join(specsDir, level, f), 'utf8'));
+  for (const { f, text } of await specFilesAt(level, hash)) {
+    const spec = yaml.load(text);
     const name = spec.meta?.name || f.slice(0, -5);
     if (byName.has(name)) duplicates.add(name);
     byName.set(name, { api: f.slice(0, -5), name, cases: spec.cases ?? [] });
@@ -211,31 +222,69 @@ async function caseIndex(level) {
 
 const REF = /^(.+)#(\d+)$/;
 
-// レベル内のテストデータの定義。cases 列の「名前#番号」をケースに解決し、ケースごとのテーブル別件数も返す
+// cases 列の「名前#番号」をケースに解決する。onHit にはケースごとの件数の集計を渡す
+const resolveRefs = (records, byName, onHit) =>
+  records.map((r) => ({
+    ...r,
+    refs: r.cases.map((ref) => {
+      const m = REF.exec(ref);
+      const spec = m && byName.get(m[1]);
+      const c = spec?.cases[Number(m[2]) - 1];
+      if (!c) return { ref, missing: true };
+      onHit?.(c);
+      return { ref, api: spec.api, name: spec.name, no: Number(m[2]), id: c.id, title: c.title, status: c.status };
+    }),
+  }));
+
+// レベル内のテストデータの定義（作業中）。ケース側の表示用に、ケースごとのテーブル別件数も返す
 async function getData(level) {
   const { byName, duplicates } = await caseIndex(level);
   const tables = [];
   const byCase = {};
   for (const f of await filesOf(path.join(dataDir, level), '.csv')) {
     const { table, columns, records } = await readTable(level, f);
-    tables.push({
-      table,
-      columns,
-      records: records.map((r) => ({
-        ...r,
-        refs: r.cases.map((ref) => {
-          const m = REF.exec(ref);
-          const spec = m && byName.get(m[1]);
-          const c = spec?.cases[Number(m[2]) - 1];
-          if (!c) return { ref, missing: true };
-          const counts = (byCase[c.id] ??= {});
-          counts[table] = (counts[table] ?? 0) + 1;
-          return { ref, api: spec.api, name: spec.name, no: Number(m[2]), id: c.id, title: c.title, status: c.status };
-        }),
-      })),
-    });
+    const onHit = (c) => {
+      const counts = (byCase[c.id] ??= {});
+      counts[table] = (counts[table] ?? 0) + 1;
+    };
+    tables.push({ table, columns, records: resolveRefs(records, byName, onHit) });
   }
   return { tables, byCase, duplicates };
+}
+
+// 指定したブランチ・版の時点のテーブル。cases 列は同じ時点のケースで解決する
+// catalog は「使用しているケース」を選ぶための、同じ時点のケースの一覧。作業中のものは編集の基準にできるよう etag を付ける
+async function getDataAt(level, table, v, branch) {
+  const { working, hash, text } = await readAt(tableFile(level, table), v, branch);
+  const { byName, duplicates } = await caseIndex(level, working ? null : hash);
+  const { columns, records } = toTable(`${table}.csv`, text);
+  const catalog = [...byName.values()].map(({ api, name, cases }) => ({
+    api,
+    name,
+    cases: cases.map((c, i) => ({ no: i + 1, id: c.id, title: c.title, status: c.status })),
+  }));
+  return { table, columns, records: resolveRefs(records, byName), duplicates, catalog, ...(working ? { etag: etagOf(text) } : {}) };
+}
+
+// テストデータの定義を上書きする。カラムはツールでは変えないので、今のファイルのヘッダーをそのまま使う
+// 元のファイルの BOM と改行コードは保つ
+async function saveData(level, table, { etag, records }) {
+  const file = tableFile(level, table);
+  const text = await fs.readFile(file, 'utf8');
+  if (etagOf(text) !== etag) {
+    throw Object.assign(new Error('ファイルが他で変更されています。画面を再読み込みしてください。'), { status: 409 });
+  }
+  if (!Array.isArray(records)) throw Object.assign(new Error('records が不正です'), { status: 400 });
+  const ids = records.map((r) => String(r.id ?? '').trim());
+  if (ids.some((id) => !id)) throw Object.assign(new Error('id が空のレコードがあります'), { status: 400 });
+  if (new Set(ids).size !== ids.length) throw Object.assign(new Error('id が重複しています'), { status: 400 });
+  const { header, columns } = toTable(`${table}.csv`, text);
+  const rows = records.map((r, i) => [ids[i], r.purpose ?? '', (r.cases ?? []).join(' '), ...columns.map((c) => r.values?.[c] ?? '')]);
+  let out = stringifyCsv([header, ...rows]);
+  if (text.includes('\r\n')) out = out.replaceAll('\n', '\r\n');
+  if (text.startsWith('\uFEFF')) out = '\uFEFF' + out;
+  await fs.writeFile(file, out);
+  return { etag: etagOf(out) };
 }
 
 // ケースの並び順が変わったら、テストデータの cases 列の番号も書き換える
@@ -305,14 +354,15 @@ async function handleApi(req, res, url) {
     if (url.pathname === '/api/data') return send(res, 200, await getData(level));
     const table = url.searchParams.get('table');
     if (!NAME.test(table ?? '')) return send(res, 400, { error: 'table が不正です' });
-    // テストデータの差分用。版の一覧と、指定した版のテーブル
+    // 版の一覧と、指定したブランチ・版の時点のテーブル（一覧・差分の両方で使う）
     if (url.pathname === '/api/data/versions') return send(res, 200, await getVersions(tableFile(level, table), branch));
+    if (url.pathname === '/api/data/table' && req.method === 'POST') {
+      return send(res, 200, await saveData(level, table, await readBody(req)));
+    }
     if (url.pathname === '/api/data/table') {
       const v = url.searchParams.get('v') ?? WORKING;
       if (v !== WORKING && !HASH.test(v)) return send(res, 400, { error: 'v が不正です' });
-      const { text } = await readAt(tableFile(level, table), v, branch);
-      const { columns, records } = toTable(`${table}.csv`, text);
-      return send(res, 200, { columns, records });
+      return send(res, 200, await getDataAt(level, table, v, branch));
     }
   }
   if (!NAME.test(api ?? '') || !LEVELS.includes(level)) return send(res, 400, { error: 'api または level が不正です' });
