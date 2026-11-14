@@ -1,0 +1,27 @@
+tables:
+  - id: e2b8d4f1-5c3a-4b72-8d6e-9f0a1b2c3d01
+    name: ユーザーの状態
+    description: 指定したユーザーの状態によるレスポンスの違い。
+    conditions:
+      - name: ユーザー
+        values: [存在する, 存在しない]
+      - name: 状態
+        values: [有効, 停止中]
+    actions:
+      - 200で取得できる
+      - 404を返す
+    rules:
+      - id: f0b1c2d3-0001-4e5f-8a9b-0c1d2e3f4d01
+        when: {ユーザー: 存在する, 状態: 有効}
+        then: [200で取得できる]
+        cases:
+          - 2e7d4b19-5a3c-4f86-9e1b-b8c6d2a4f401
+      - id: f0b1c2d3-0002-4e5f-8a9b-0c1d2e3f4d02
+        when: {ユーザー: 存在しない, 状態: '-'}
+        then: [404を返す]
+        cases:
+          - 7b2f8c46-1d9e-4a03-8c5f-e9a1b3d7c402
+      - id: f0b1c2d3-0003-4e5f-8a9b-0c1d2e3f4d03
+        when: {ユーザー: 存在する, 状態: 停止中}
+        then: [404を返す]
+        cases: []

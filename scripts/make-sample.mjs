@@ -1,10 +1,10 @@
-// fixtures/<サーバー>/<test-specs|test-data>/<レベル>/<名前>/v<n>.yaml から、版ごとにコミットしたサンプルのリポジトリを sample/<サーバー>/ に作る
+// fixtures/<サーバー>/<test-specs|test-data|decision-tables>/<レベル>/... から、版ごとにコミットしたサンプルのリポジトリを sample/<サーバー>/ に作る
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
-import { toYaml } from '../lib/yaml.mjs';
+import { toYaml, toDtYaml } from '../lib/yaml.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = path.join(root, 'fixtures');
@@ -17,10 +17,11 @@ for (const server of await fs.readdir(fixtures)) {
   for (const kind of await fs.readdir(path.join(fixtures, server))) {
     for (const level of await fs.readdir(path.join(fixtures, server, kind))) {
       for (const name of await fs.readdir(path.join(fixtures, server, kind, level))) {
-        // テストデータの CSV は版を持たず、そのまま 1 回コミットする
-        if (name.endsWith('.csv')) {
+        // テストデータの CSV とディシジョンテーブルの YAML は版を持たず、そのまま 1 回コミットする
+        if (name.endsWith('.csv') || name.endsWith('.yaml')) {
           const text = await fs.readFile(path.join(fixtures, server, kind, level, name), 'utf8');
-          commits.push({ rel: `${kind}/${level}/${name}`, text, updatedAt: '2026-10-25', changes: 'テストデータ定義を追加', v: 0 });
+          const [updatedAt, changes] = name.endsWith('.csv') ? ['2026-10-25', 'テストデータ定義を追加'] : ['2026-10-26', 'ディシジョンテーブルを追加'];
+          commits.push({ rel: `${kind}/${level}/${name}`, text, updatedAt, changes, v: 0 });
           continue;
         }
         for (const f of await fs.readdir(path.join(fixtures, server, kind, level, name))) {
@@ -72,7 +73,13 @@ async function makeFeatureBranch(repo, commit) {
   await fs.writeFile(specFile, toYaml(spec));
   const csvFile = path.join(repo, 'test-data/ita/users.csv');
   const csv = await fs.readFile(csvFile, 'utf8');
-  await fs.writeFile(csvFile, csv.replace('取得できないことの確認に使う予定,,', '取得できないことの確認に使う,ユーザー取得API#3,').replace('ユーザー取得API#1 ユーザー取得API#2,', 'ユーザー取得API#1 ユーザー取得API#2 ユーザー取得API#3,'));
+  const [get1, get2, added] = spec.cases.map((c) => c.id);
+  await fs.writeFile(csvFile, csv.replace('取得できないことの確認に使う予定,,', `取得できないことの確認に使う,${added},`).replace(`${get1} ${get2},`, `${get1} ${get2} ${added},`));
+  // ディシジョンテーブルの「ケースなし」だったルールに、追加したケースを紐付ける
+  const dtFile = path.join(repo, 'decision-tables/ita/users-get.yaml');
+  const dt = yaml.load(await fs.readFile(dtFile, 'utf8'));
+  dt.tables[0].rules[2].cases = [added];
+  await fs.writeFile(dtFile, toDtYaml(dt));
   git('add', '.');
   commit('停止中のユーザーを取得した場合のケースを追加', '2026-11-05');
   git('checkout', '-q', 'main');

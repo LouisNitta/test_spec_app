@@ -1,6 +1,6 @@
 id,purpose,cases,name,email,role,status,phone,birthday,created_at,deleted_at
-5b3e1c7a-2f4d-4e8b-9a61-0c7d2e8f4a01,管理者ユーザー。管理者権限が必要なAPIのログインユーザーとして使う,ユーザー登録API#1 ユーザー登録API#2 ユーザー登録API#3 ユーザー登録API#4 ユーザー登録API#5 ユーザー登録API#6 ユーザー登録API#9 ユーザー登録API#10 ユーザー登録API#11 ユーザー登録API#12 ユーザー取得API#1 ユーザー取得API#2,管理者 一郎,admin@example.com,admin,active,-,-,-,NULL
-8d1f4a2c-6e3b-4c97-b0d5-1e9a3f7c5b02,閲覧者ユーザー。権限不足（403）の確認に使う,ユーザー登録API#8,閲覧 次郎,viewer@example.com,viewer,active,-,-,-,NULL
-2a7c9e4f-1b6d-4f38-8c2a-5d0e7b3f9c03,登録済みのメールアドレス taro@example.com を持つユーザー。重複登録（409）の確認に使う,ユーザー登録API#6,-,taro@example.com,-,active,-,-,-,NULL
-c6e2b8d1-9a4f-4b05-a7e3-2f8c1d6b0e04,取得APIで取得する対象のユーザー。任意項目もすべて入れておく,ユーザー取得API#1,佐藤 花子,hanako@example.com,member,active,090-1234-5678,1995-04-01,-,NULL
+5b3e1c7a-2f4d-4e8b-9a61-0c7d2e8f4a01,管理者ユーザー。管理者権限が必要なAPIのログインユーザーとして使う,8c1d2f4a-6b3e-4f7a-9d21-5e8b7c0a1f01 2f9b7e13-0c4d-4a8e-b5f2-71d3e6a9c402 c47a0e85-91b2-4d6f-8a3c-0e5f2b7d1803 5e0d3b9c-27f8-4c1a-9e64-b8a2d0f3c504 a81f6c27-4d3e-4b90-8c15-3f7e9a2b6d05 3f2a9c1e-84b2-4d7a-a189-98e3b56cf206 0e7f1b36-a5c4-4d92-8b07-e2f9c4a6b309 7a3d9e51-c8b4-4f2e-a6d0-1b5c3f8e9a10 b2e8f4c9-1d7a-4e35-9c60-8f3a2d5b7e11 e5a1c7d3-9f02-4b8e-a4d6-2c7e0b9f3a12 2e7d4b19-5a3c-4f86-9e1b-b8c6d2a4f401 7b2f8c46-1d9e-4a03-8c5f-e9a1b3d7c402,管理者 一郎,admin@example.com,admin,active,-,-,-,NULL
+8d1f4a2c-6e3b-4c97-b0d5-1e9a3f7c5b02,閲覧者ユーザー。権限不足（403）の確認に使う,d9c2a5f7-3e81-4b06-9f4a-6c1b8e0d2a08,閲覧 次郎,viewer@example.com,viewer,active,-,-,-,NULL
+2a7c9e4f-1b6d-4f38-8c2a-5d0e7b3f9c03,登録済みのメールアドレス taro@example.com を持つユーザー。重複登録（409）の確認に使う,3f2a9c1e-84b2-4d7a-a189-98e3b56cf206,-,taro@example.com,-,active,-,-,-,NULL
+c6e2b8d1-9a4f-4b05-a7e3-2f8c1d6b0e04,取得APIで取得する対象のユーザー。任意項目もすべて入れておく,2e7d4b19-5a3c-4f86-9e1b-b8c6d2a4f401,佐藤 花子,hanako@example.com,member,active,090-1234-5678,1995-04-01,-,NULL
 f9d3a6b2-4c8e-4a71-b2f6-8e5c0a9d1f05,停止中のユーザー。停止中のユーザーは取得できないことの確認に使う予定,,停止 三郎,suspended@example.com,member,suspended,-,-,-,2026-10-01 00:00:00

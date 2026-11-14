@@ -105,6 +105,14 @@ const state = {
   // テストデータの差分。dataVersionsBy はブランチごとの版の一覧（今開いているテーブルのもの）
   dataDiff: { onlyChanged: true },
   dataVersionsBy: {},
+  // ディシジョンテーブル。dt は表示中のブランチ・版の内容、dtWorking はケースの詳細に出すラベル用（作業中の内容）
+  dt: null,
+  dtWorking: null,
+  dtFocus: null, // 強調するルール { table, rule }
+  dtListOpen: new Set(), // 「ルールとケースの対応」を開いている表のid
+  dtVersionsBy: {},
+  dtDiff: { onlyChanged: true },
+  dtDraft: null, // ディシジョンテーブルの編集中の内容
 };
 
 async function request(url, opts) {
@@ -139,8 +147,12 @@ async function selectSpec(api, level) {
   }
   state.selectedId = null;
   state.draft = emptyDraft();
-  await Promise.all([loadVersion(latestVersion()), loadData(level, true)]);
+  state.dtVersionsBy = {};
+  await Promise.all([loadVersion(latestVersion()), loadData(level, true), loadDtWorking()]);
   if (state.view === 'diff') return openDiff();
+  // ディシジョンテーブルを見ているときは、別の API・画面でもディシジョンテーブルを開く
+  if (state.view === 'dt' && hasDt()) return openDt();
+  if (state.view === 'dt-diff' && hasDt()) return openDtDiff({ toBranch: state.branch });
   state.view = 'specs';
   render();
 }
@@ -280,7 +292,7 @@ function changedPaths(id) {
 const rawKeys = (id) => Object.keys(state.draft.raw).filter((k) => k.startsWith(`${id}|`));
 const isDirty = (id) => isNewCase(id) || changedPaths(id).length > 0 || rawKeys(id).length > 0;
 const dirtyIds = () => [...state.draft.cases.keys()].filter(isDirty);
-const hasDirty = () => dirtyIds().length > 0 || (state.dataDraft != null && hasDataDirty());
+const hasDirty = () => dirtyIds().length > 0 || (state.dataDraft != null && hasDataDirty()) || hasDtDirty();
 
 // 項目ごとに戻せるのは、並び順（no）と状態（有効・無効の切り替えボタンで戻せる）以外の項目
 const REVERTIBLE = (path) => path !== 'no' && path !== 'status';
@@ -352,7 +364,7 @@ function renderAll() {
   document.body.classList.toggle('sidebar-closed', !state.sidebarOpen);
   document.body.classList.toggle('specs-view', state.view === 'specs');
   renderSidebar();
-  $('#main').innerHTML = { diff: renderDiff, data: renderData, 'data-diff': renderDataDiff }[state.view]?.() ?? renderSpecs();
+  $('#main').innerHTML = { diff: renderDiff, data: renderData, 'data-diff': renderDataDiff, dt: renderDt, 'dt-diff': renderDtDiff }[state.view]?.() ?? renderSpecs();
 
   document.querySelectorAll('[data-scroll]').forEach((el) => {
     if (scrolls[el.dataset.scroll] != null) el.scrollTop = scrolls[el.dataset.scroll];
@@ -373,7 +385,7 @@ function renderSidebar() {
         <div class="api-name">${esc(t.name)}</div>
         ${t.levels
           .map(
-            (l) => `<button class="level ${state.view !== 'data' && l.api === state.api && l.level === state.level ? 'active' : ''}"
+            (l) => `<button class="level ${!state.view.startsWith('data') && l.api === state.api && l.level === state.level ? 'active' : ''}"
               data-act="level" data-api="${esc(l.api)}" data-level="${l.level}">${LABEL.level[l.level]}<span>${l.count}</span></button>`,
           )
           .join('')}
@@ -478,13 +490,17 @@ function renderSpecs() {
     <div class="specs-head">
       <div class="pane-head">
         ${crumb()}
+        ${paneTabs()}
+        <div class="spacer"></div>
+        ${caseModeSwitch()}
+      </div>
+      <div class="pane-head sub">
         ${branchSelect('branch', state.branch)}
         <select data-act="version">${state.versions
           .map((v) => `<option value="${v.id}" ${v.id === state.version ? 'selected' : ''}>${esc(v.label)}${v.id === latestVersion() ? ' · 最新' : ''}</option>`)
           .join('')}</select>
         <div class="spacer"></div>
         <button class="btn primary" data-act="new-case" ${canEdit() ? '' : 'disabled'}>ケースを追加</button>
-        ${caseModeSwitch()}
       </div>
       ${
         canEdit()
@@ -761,21 +777,24 @@ const dataDirtyRows = () => (state.dataDraft?.rows ?? []).filter(recChange);
 const hasDataDirty = () => dataDirtyRows().length > 0;
 const colLabel = (col) => (col === PURPOSE ? '意図' : col === CASES ? '使用しているケース' : col);
 
-// cases 列の「名前#番号」を、同じ時点のケースの一覧から解決する（名前が重複しているときはサーバーと同じく後のものを使う）
-function resolveRef(ref) {
-  const m = /^(.+)#(\d+)$/.exec(ref);
-  const spec = m && state.dataView.catalog.findLast((x) => x.name === m[1]);
-  const c = spec?.cases[Number(m[2]) - 1];
-  return c ? { ref, api: spec.api, name: spec.name, no: c.no, id: c.id, title: c.title, status: c.status } : { ref, missing: true };
-}
-// 絞り込み中のケースを cases 列の書き方にする
-function refOfCase(caseId) {
-  for (const spec of state.dataView.catalog) {
-    const c = spec.cases.find((x) => x.id === caseId);
-    if (c) return `${spec.name}#${c.no}`;
+// cases 列のケースの id を、同じ時点のケースの一覧から解決する
+function caseOfRef(view, ref) {
+  for (const spec of view.catalog ?? []) {
+    const c = spec.cases.find((x) => x.id === ref);
+    if (c) return { ref, api: spec.api, name: spec.name, ...c };
   }
-  return null;
+  return { ref, missing: true };
 }
+const resolveRef = (ref) => caseOfRef(state.dataView, ref);
+// 該当するケースがない id は、先頭だけを出す
+const shortId = (id) => String(id).slice(0, 8);
+// 差分で出すケースの呼び名。番号はその時点の並び順で決まる
+const refLabel = (view, ref) => {
+  const c = caseOfRef(view, ref);
+  return c.missing ? `${shortId(ref)}（該当するケースなし）` : `${c.name} #${c.no}`;
+};
+// 絞り込み中のケースが、表示中の時点にあるか
+const refOfCase = (caseId) => (resolveRef(caseId).missing ? null : caseId);
 
 function setCell(id, col, value) {
   const r = dataRow(id);
@@ -883,11 +902,12 @@ function renderData() {
       .map(([name, xs]) =>
         name
           ? `<div class="use"><span class="use-name">${esc(name)}</span>${xs
+              .toSorted((a, b) => a.no - b.no)
               .map(
                 (ref) => `<span class="use-chip"><button class="use-case ${ref.status === '無効' ? 'excluded' : ''} ${ref.id === caseId ? 'hit' : ''}" data-act="open-case" data-api="${esc(ref.api)}" data-level="${level}" data-id="${ref.id}" title="${esc(ref.title)}">#${ref.no}</button>${x(ref)}</span>`,
               )
               .join('')}</div>`
-          : `<div class="use">${xs.map((ref) => `<span class="use-chip"><span class="use-missing" title="該当するケースがありません">${esc(ref.ref)}</span>${x(ref)}</span>`).join('')}</div>`,
+          : `<div class="use">${xs.map((ref) => `<span class="use-chip"><span class="use-missing" title="該当するケースがありません（${esc(ref.ref)}）">${esc(shortId(ref.ref))}</span>${x(ref)}</span>`).join('')}</div>`,
       )
       .join('');
     const empty = r.refs.length ? '' : '<span class="unused">未使用</span>';
@@ -897,7 +917,7 @@ function renderData() {
       const spec = t.catalog.find((s) => s.name === p.name) ?? t.catalog[0];
       return `${list}<div class="ref-picker">
         <select data-act="data-pick-name">${t.catalog.map((s) => `<option ${s === spec ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
-        <select class="pick-no">${(spec?.cases ?? []).map((c) => `<option value="${c.no}">#${c.no} ${esc(c.title)}${c.status === '無効' ? '（無効）' : ''}</option>`).join('')}</select>
+        <select class="pick-no">${(spec?.cases ?? []).map((c) => `<option value="${c.id}">#${c.no} ${esc(c.title)}${c.status === '無効' ? '（無効）' : ''}</option>`).join('')}</select>
         <div class="pick-actions"><button type="button" class="btn small primary" data-act="data-pick-ok" data-rec="${esc(r.id)}">追加</button><button type="button" class="link" data-act="data-pick-cancel">キャンセル</button></div>
       </div>`;
     }
@@ -925,8 +945,7 @@ function renderData() {
     .join('');
 
   const warn = [
-    t.duplicates.length ? `同じ名前のAPI・画面があるため、番号で区別できません：${t.duplicates.map(esc).join('、')}` : '',
-    missing ? `該当するケースがない番号が ${missing} 件あります（赤字）` : '',
+    missing ? `該当するケースがない紐付けが ${missing} 件あります（赤字）` : '',
   ].filter(Boolean);
 
   return `<div class="data-view ${editable ? 'can-edit' : ''}">
@@ -988,7 +1007,8 @@ function computeDataDiff(a, b) {
 }
 
 const DATA_TYPE_LABEL = { added: '追加', changed: '変更', removed: '削除', same: '変更なし' };
-const refTag = (ref, cls) => `<span class="ref-tag ${cls}">${cls === 'add' ? '+' : cls === 'del' ? '−' : ''} ${esc(ref)}</span>`;
+// 追加したケースは後の時点、外したケースは前の時点の番号で出す
+const refTag = (ref, cls) => `<span class="ref-tag ${cls}">${cls === 'add' ? '+' : cls === 'del' ? '−' : ''} ${esc(refLabel(cls === 'del' ? state.dataDiff.a : state.dataDiff.b, ref))}</span>`;
 
 function dataChangeHtml(row) {
   const r = row.rec;
@@ -1063,6 +1083,617 @@ function renderDataDiff() {
   </div>`;
 }
 
+/* ---------- decision table ---------- */
+
+// ディシジョンテーブルは API・画面に属するので、サイドバーではなく API のページの中でケースと切り替える
+const levelEntry = () => state.tree.items.flatMap((t) => t.levels).find((l) => l.api === state.api && l.level === state.level);
+const isDtView = () => state.view === 'dt' || state.view === 'dt-diff';
+// ディシジョンテーブルを管理するのは API だけ。画面（ui）ではタブを出さない
+const hasDt = () => specType(state.spec) === 'api';
+const paneTabs = () => {
+  if (!hasDt()) return '';
+  const l = levelEntry();
+  const tab = (pane, label, n) =>
+    `<button data-act="pane" data-pane="${pane}" class="${(pane === 'dt') === isDtView() ? 'on' : ''}">${label}<span>${n ?? 0}</span></button>`;
+  return `<div class="pane-tabs">${tab('cases', 'ケース', l?.count)}${tab('dt', 'ディシジョンテーブル', l?.dt)}</div>`;
+};
+const dtModeSwitch = () => {
+  const b = (view, label) => `<button data-act="dt-mode" data-view-to="${view}" class="${state.view === view ? 'on' : ''}">${label}</button>`;
+  return `<div class="seg mode-switch data-mode">${b('dt', '一覧')}${b('dt-diff', '差分')}</div>`;
+};
+
+const dtUrl = (branch, v) => `/api/dt?api=${q(state.api)}&level=${state.level}&branch=${q(branch)}${v ? `&v=${q(v)}` : ''}`;
+async function dtVersionsOf(branch, force) {
+  if (force || !state.dtVersionsBy[branch]) {
+    state.dtVersionsBy[branch] = await request(`/api/dt/versions?api=${q(state.api)}&level=${state.level}&branch=${q(branch)}`);
+  }
+  return state.dtVersionsBy[branch];
+}
+// ケースの詳細に出すラベル用。現在のブランチの作業中の内容を使う
+async function loadDtWorking() {
+  state.dtWorking = await request(dtUrl(state.currentBranch));
+}
+
+// ブランチと版を選んで、その時点の表を表示する。focus を渡すと、そのルールの列を強調する
+async function openDt({ branch, v, focus } = {}) {
+  branch ??= state.branch;
+  const versions = (await dtVersionsOf(branch, true)).map((x) => x.id);
+  if (!versions.includes(v)) v = versions.at(-1);
+  const data = v ? await request(dtUrl(branch, v)) : { tables: [], cases: [], missing: true };
+  state.dt = { branch, v, ...data };
+  if (!hasDtDirty()) state.dtDraft = null;
+  state.dtFocus = focus ?? null;
+  state.view = 'dt';
+  render();
+  if (focus) $(`.dt-table th[data-rule="${focus.rule}"]`)?.scrollIntoView({ block: 'center', inline: 'center' });
+}
+
+async function openDtDiff({ fromBranch, from, toBranch, to } = {}) {
+  toBranch ??= state.dt?.branch ?? state.branch;
+  fromBranch ??= toBranch;
+  const toVs = (await dtVersionsOf(toBranch)).map((x) => x.id);
+  const fromVs = (await dtVersionsOf(fromBranch)).map((x) => x.id);
+  if (!toVs.includes(to)) to = toVs.at(-1);
+  if (!fromVs.includes(from)) from = fromBranch === toBranch ? fromVs[Math.max(0, fromVs.indexOf(to) - 1)] : fromVs.at(-1);
+  if (!from || !to) return toast('このブランチにはディシジョンテーブルがありません', true);
+  const [a, b] = await Promise.all([request(dtUrl(fromBranch, from)), request(dtUrl(toBranch, to))]);
+  Object.assign(state.dtDiff, { fromBranch, from, toBranch, to, a, b });
+  state.view = 'dt-diff';
+  render();
+}
+
+const ruleLabel = (i) => `R${i + 1}`;
+const condNames = (t) => (t.conditions ?? []).map((c) => c.name);
+// 書かれていない条件は「どちらでもよい」として扱う
+const whenOf = (r, name) => String(r.when?.[name] ?? '-');
+const dtVal = (v) => (v === '-' ? '<span class="any" title="どちらでもよい">-</span>' : esc(v));
+// 結果の行。actions にない結果が then に書かれていたら、行を足して表示する
+const actionNames = (t) => [...new Set([...(t.actions ?? []), ...(t.rules ?? []).flatMap((r) => r.then ?? [])])];
+const ruleState = (r) => (r.skip != null ? 'skip' : (r.cases ?? []).length ? 'ok' : 'none');
+
+// ケースの詳細に出す、このケースを使っているルール
+function dtRefs(c, compact) {
+  const refs = (state.dtWorking?.tables ?? []).flatMap((t) =>
+    (t.rules ?? []).map((r, i) => ({ t, r, i })).filter(({ r }) => (r.cases ?? []).includes(c.id)),
+  );
+  const chips = refs
+    .map(
+      ({ t, r, i }) => `<button class="dref" data-act="open-dt-rule" data-table="${esc(t.id)}" data-rule="${esc(r.id)}" title="ディシジョンテーブルのこのルールを表示">
+        <span class="k">${esc(t.name)}</span><span class="p">${ruleLabel(i)}</span></button>`,
+    )
+    .join('');
+  if (compact) return refs.length ? `<div class="rdata"><span class="rlabel">ディシジョンテーブル</span><div class="chips">${chips}</div></div>` : '';
+  return state.dtWorking?.tables.length ? `<h3>ディシジョンテーブル</h3><div class="ddata">${refs.length ? chips : '<span class="muted">なし</span>'}</div>` : '';
+}
+
+/* ---------- decision table editing ---------- */
+
+// 表示と編集で同じ形を使う。条件・結果には、保存済みの名前（_orig）を持たせて名前の変更を追えるようにする
+// 編集中は、追加した表・ルールに _new、削除したものに _deleted を付ける。保存するまでファイルには書き込まない
+const toDtModel = (tables) =>
+  tables.map((t) => ({
+    ...t,
+    conditions: (t.conditions ?? []).map((c) => ({ name: c.name, values: [...(c.values ?? [])].map(String), _orig: c.name })),
+    actions: actionNames(t).map((a) => ({ name: a, _orig: a })),
+    rules: (t.rules ?? []).map((r) => ({ ...r, when: { ...r.when }, then: [...(r.then ?? [])], cases: [...(r.cases ?? [])] })),
+  }));
+const canEditDt = () => !!state.dt?.etag;
+const dtTables = () => state.dtDraft?.tables ?? toDtModel(state.dt.tables);
+const origDtTable = (id) => state.dt.tables.find((t) => t.id === id);
+const draftTable = (id) => state.dtDraft.tables.find((t) => t.id === id);
+function ensureDtDraft() {
+  state.dtDraft ??= { tables: toDtModel(state.dt.tables) };
+  return state.dtDraft;
+}
+function settleDtDraft() {
+  if (state.dtDraft && !state.dtDraft.tables.some(dtTableChange)) state.dtDraft = null;
+}
+const hasDtDirty = () => !!state.dtDraft && state.dtDraft.tables.some(dtTableChange);
+
+// ルールの変更。条件・結果の名前を変えていても、保存済みの名前で元の値と比べる
+function dtRuleChange(t, r) {
+  if (t._new) return null;
+  if (r._new) return { type: 'added' };
+  if (r._deleted) return { type: 'removed' };
+  const o = origDtTable(t.id).rules.find((x) => x.id === r.id);
+  const conds = t.conditions.filter((c) => whenOf(r, c.name) !== (c._orig ? whenOf(o, c._orig) : '-')).map((c) => c.name);
+  const actions = t.actions.filter((a) => r.then.includes(a.name) !== (a._orig ? (o.then ?? []).includes(a._orig) : false)).map((a) => a.name);
+  const cases = r.cases.join() !== (o.cases ?? []).join() || (r.skip ?? null) !== (o.skip ?? null);
+  return conds.length || actions.length || cases ? { type: 'changed', conds, actions, cases } : null;
+}
+const plainConds = (list) => JSON.stringify((list ?? []).map((c) => [c.name, (c.values ?? []).map(String)]));
+function dtTableChange(t) {
+  if (t._new) return { type: 'added', what: ['新規追加'] };
+  if (t._deleted) return { type: 'removed', what: ['削除'] };
+  const o = origDtTable(t.id);
+  const what = [];
+  if (t.name !== o.name) what.push('名前');
+  if ((t.description ?? '') !== (o.description ?? '')) what.push('説明');
+  if (plainConds(t.conditions) !== plainConds(o.conditions)) what.push('条件');
+  if (t.actions.map((a) => a.name).join('\n') !== actionNames(o).join('\n')) what.push('結果');
+  t.rules.forEach((r, i) => dtRuleChange(t, r) && what.push(ruleLabel(i)));
+  const kept = t.rules.filter((r) => !r._new).map((r) => r.id);
+  if (kept.join() !== o.rules.map((r) => r.id).join()) what.push('ルールの並び順');
+  return what.length ? { type: 'changed', what } : null;
+}
+
+// 保存する形に戻す。変更していない表・ルールは元の書き方のまま残して、余計な差分を出さない
+function dtPayload() {
+  return state.dtDraft.tables
+    .filter((t) => !t._deleted)
+    .map((t) => {
+      const o = origDtTable(t.id);
+      if (o && !dtTableChange(t)) return o;
+      const sameConds = o && t.conditions.map((c) => c.name).join('\n') === condNames(o).join('\n') && t.actions.every((a) => a._orig === a.name);
+      // キーの並びを元のファイルと同じにして、余計な差分を出さない
+      const { _new, _deleted, id, name, description, conditions, actions, rules, ...rest } = t;
+      return {
+        id,
+        name,
+        ...(description ? { description } : {}),
+        ...rest,
+        conditions: t.conditions.map(({ name, values }) => ({ name, values })),
+        actions: t.actions.map((a) => a.name),
+        rules: t.rules
+          .filter((r) => !r._deleted)
+          .map((r) => {
+            const orig = o?.rules.find((x) => x.id === r.id);
+            if (orig && sameConds && !dtRuleChange(t, r)) return orig;
+            const { _new: n, _deleted: d, when, then, cases, skip, ...extra } = r;
+            return {
+              ...extra,
+              when: Object.fromEntries(t.conditions.map((c) => [c.name, whenOf(r, c.name)])),
+              then: t.actions.map((a) => a.name).filter((a) => then.includes(a)),
+              ...(skip != null ? { skip } : { cases }),
+            };
+          }),
+      };
+    });
+}
+
+async function saveDtDraft() {
+  const tables = state.dtDraft.tables.filter((t) => !t._deleted);
+  const noName = tables.find((t) => !t.name.trim());
+  if (noName) return toast('表の名前を入力してください', true);
+  for (const t of tables) {
+    const i = t.rules.findIndex((r) => !r._deleted && r.skip != null && !r.skip.trim());
+    if (i >= 0) return toast(`「${t.name}」の ${ruleLabel(i)} の対象外の理由を入力してください`, true);
+  }
+  try {
+    await request(`/api/dt?api=${q(state.api)}&level=${state.level}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ etag: state.dt.etag, tables: dtPayload() }),
+    });
+    state.dtDraft = null;
+    state.tree = await request('/api/tree');
+    await loadDtWorking();
+    await openDt({ branch: state.dt.branch });
+    toast('保存しました。版として残すには git でコミットしてください');
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// 条件・結果の名前を変えたら、ルール側の書き方も合わせて変える
+function renameCond(t, c, name) {
+  for (const r of t.rules) {
+    if (c.name in r.when) (r.when[name] = r.when[c.name]), delete r.when[c.name];
+  }
+  c.name = name;
+}
+function renameAction(t, a, name) {
+  for (const r of t.rules) r.then = r.then.map((x) => (x === a.name ? name : x));
+  a.name = name;
+}
+function revertDtRule(t, r) {
+  const i = t.rules.indexOf(r);
+  if (r._new) return t.rules.splice(i, 1);
+  const o = origDtTable(t.id).rules.find((x) => x.id === r.id);
+  // 条件・結果の名前を変えていたら、今の名前に合わせて戻す
+  t.rules[i] = {
+    ...o,
+    when: Object.fromEntries(t.conditions.filter((c) => c._orig).map((c) => [c.name, whenOf(o, c._orig)])),
+    then: t.actions.filter((a) => a._orig && (o.then ?? []).includes(a._orig)).map((a) => a.name),
+    cases: [...(o.cases ?? [])],
+  };
+}
+const newDtRule = (t, base) => ({
+  ...(base ? structuredClone(base) : { when: Object.fromEntries(t.conditions.map((c) => [c.name, '-'])), then: [], cases: [] }),
+  id: crypto.randomUUID(),
+  _new: true,
+  _deleted: undefined,
+});
+
+// 名前・説明・対象外の理由・条件・結果の入力欄。条件は「名前」と「取りうる値（カンマ区切り）」の 2 つ
+function openDtEditor(el) {
+  if (el.querySelector('.dt-input')) return;
+  const { dtedit: kind, table, index, rule } = el.dataset;
+  const t = dtTables().find((x) => x.id === table);
+  const input = (name, value, ph) => `<input class="dt-input" name="${name}" value="${esc(value)}" placeholder="${ph}">`;
+  let html;
+  if (kind === 'tname') html = input('value', t.name, '表の名前');
+  else if (kind === 'tdesc') html = input('value', t.description ?? '', '表の説明');
+  else if (kind === 'skip') html = input('value', t.rules.find((r) => r.id === rule).skip ?? '', 'テストしない理由');
+  else if (kind === 'action') html = input('value', t.actions[index].name, '結果（例：400を返す）');
+  else html = input('value', t.conditions[index].name, '条件（例：名前）') + input('values', t.conditions[index].values.join(', '), '値をカンマ区切りで（例：あり, 空）');
+  const del = kind === 'cond' || kind === 'action' ? `<button type="button" class="link" data-act="dt-row-del" data-kind="${kind}" data-table="${esc(table)}" data-index="${index}">削除</button>` : '';
+  el.classList.add('editing');
+  el.innerHTML = `<span class="dt-editor">${html}${del}</span>`;
+  const first = el.querySelector('.dt-input');
+  first.focus();
+  first.select();
+}
+function commitDtEditor(el, cancel = false) {
+  if (!el?.querySelector('.dt-input')) return;
+  const { dtedit: kind, table, index, rule } = el.dataset;
+  const value = el.querySelector('[name="value"]').value.trim();
+  const values = el.querySelector('[name="values"]')?.value.split(/[,、]/).map((x) => x.trim()).filter(Boolean);
+  el.innerHTML = '';
+  if (!cancel) {
+    const t = ensureDtDraft().tables.find((x) => x.id === table);
+    if (kind === 'tname') t.name = value || t.name;
+    else if (kind === 'tdesc') t.description = value;
+    else if (kind === 'skip') t.rules.find((r) => r.id === rule).skip = value;
+    else {
+      const list = kind === 'cond' ? t.conditions : t.actions;
+      const row = list[index];
+      if (list.some((x) => x !== row && x.name === value)) toast(`「${value}」はすでにあります`, true);
+      else if (value && value !== row.name) (kind === 'cond' ? renameCond : renameAction)(t, row, value);
+      if (kind === 'cond') row.values = [...new Set(values)];
+    }
+  }
+  // 名前を入れずに閉じた行は残さない
+  for (const t of state.dtDraft?.tables ?? []) {
+    t.conditions = t.conditions.filter((c) => c.name);
+    t.actions = t.actions.filter((a) => a.name);
+  }
+  settleDtDraft();
+  render();
+}
+
+// 条件の値とケースは、ブラウザ標準の選択欄で選ぶ（表の外にはみ出しても隠れない）
+function openDtSelect(td, html) {
+  td.innerHTML = html;
+  const sel = td.querySelector('select');
+  sel.focus();
+  try {
+    sel.showPicker();
+  } catch {}
+}
+
+function dtTableHtml(t, cases, editable) {
+  const tid = esc(t.id);
+  const change = state.dtDraft ? dtTableChange(t) : null;
+  const rules = t.rules.map((r, i) => ({ r, i, change: state.dtDraft ? dtRuleChange(t, r) : null }));
+  const focus = state.dtFocus?.table === t.id ? state.dtFocus.rule : null;
+  if (t._deleted) {
+    return `<section class="dt dt-deleted" data-dt="${tid}"><div class="dt-head"><span class="type removed">削除</span><h2>${esc(t.name)}</h2>
+      <button class="link" data-act="dt-table-revert" data-table="${tid}">削除を取り消す</button></div></section>`;
+  }
+  const colCls = ({ r, change: c }) => `${r.id === focus ? 'focus' : ''} ${c ? `dt-${c.type}` : ''}`;
+  const can = (x) => editable && !x.r._deleted;
+  const span = rules.length + 1 + (editable ? 1 : 0);
+  const filler = editable ? '<td class="dt-fill"></td>' : '';
+  const attrs = (x) => `data-table="${tid}" data-rule="${esc(x.r.id)}"`;
+
+  const head = rules
+    .map((x) => {
+      const c = x.change;
+      const btn = (act, label, title = '') => `<button type="button" class="link" data-act="${act}" ${attrs(x)} ${title ? `title="${title}" aria-label="${title}"` : ''}>${label}</button>`;
+      const actions = !editable
+        ? ''
+        : x.r._deleted
+          ? btn('dt-rule-revert', '取り消す')
+          : `${x.i > 0 ? btn('dt-rule-left', '←', '左へ移動') : ''}${x.i < rules.length - 1 ? btn('dt-rule-right', '→', '右へ移動') : ''}${btn('dt-rule-dup', '複製')}${btn('dt-rule-del', x.r._new ? '取り消す' : '削除')}${c?.type === 'changed' ? btn('dt-rule-revert', '戻す') : ''}`;
+      return `<th class="${colCls(x)}" data-rule="${esc(x.r.id)}">${ruleLabel(x.i)}${c ? `<span class="type ${c.type}">${DATA_TYPE_LABEL[c.type]}</span>` : ''}${
+        actions ? `<span class="dt-rule-actions">${actions}</span>` : ''
+      }</th>`;
+    })
+    .join('');
+
+  const rowTh = (kind, row, i) => {
+    const changed = state.dtDraft && !t._new && (!row._orig || row._orig !== row.name || (kind === 'cond' && plainConds([row]) !== plainConds(origDtTable(t.id).conditions.filter((c) => c.name === row._orig))));
+    const vals = kind === 'cond' && row.values.length ? `<span class="dt-values">${row.values.map(esc).join(' / ')}</span>` : '';
+    const len = (kind === 'cond' ? t.conditions : t.actions).length;
+    const mv = (dir, label, title) => `<button type="button" class="link" data-act="dt-row-move" data-kind="${kind}" data-table="${tid}" data-index="${i}" data-dir="${dir}" title="${title}" aria-label="${title}">${label}</button>`;
+    const move = editable && len > 1 ? `<span class="dt-row-move">${i > 0 ? mv(-1, '↑', '上へ移動') : ''}${i < len - 1 ? mv(1, '↓', '下へ移動') : ''}</span>` : '';
+    return `<th class="${editable ? 'dt-editable' : ''} ${changed ? 'dt-changed' : ''}" ${editable ? `data-dtedit="${kind}" data-table="${tid}" data-index="${i}" title="クリックして編集"` : ''}>${esc(row.name)}${vals}${move}</th>`;
+  };
+
+  const condRows = t.conditions
+    .map(
+      (c, i) => `<tr>${rowTh('cond', c, i)}${rules
+        .map((x) => {
+          const v = whenOf(x.r, c.name);
+          const chg = x.change?.type === 'changed' && x.change.conds.includes(c.name);
+          const odd = v !== '-' && c.values.length && !c.values.includes(v);
+          return `<td class="${colCls(x)} ${chg ? 'cell-changed' : ''} ${can(x) ? 'dt-cell' : ''}" ${can(x) ? `data-kind="cond" data-cond="${i}" ${attrs(x)}` : ''}>${
+            odd ? `<span class="use-missing" title="条件の値の一覧にありません">${esc(v)}</span>` : dtVal(v)
+          }</td>`;
+        })
+        .join('')}${filler}</tr>`,
+    )
+    .join('');
+
+  const actionRows = t.actions
+    .map(
+      (a, i) => `<tr>${rowTh('action', a, i)}${rules
+        .map((x) => {
+          const chg = x.change?.type === 'changed' && x.change.actions.includes(a.name);
+          return `<td class="${colCls(x)} ${chg ? 'cell-changed' : ''} ${can(x) ? 'dt-cell' : ''}" ${can(x) ? `data-kind="action" data-action="${i}" ${attrs(x)}` : ''}>${
+            x.r.then.includes(a.name) ? '<span class="dt-check">✓</span>' : ''
+          }</td>`;
+        })
+        .join('')}${filler}</tr>`,
+    )
+    .join('');
+
+  const caseOf = (id) => cases.find((c) => c.id === id);
+  const caseCell = (x) => {
+    const { r } = x;
+    const e = can(x);
+    const rm = (act, extra = '') => (e ? `<button type="button" class="ref-x" data-act="${act}" ${attrs(x)} ${extra} aria-label="外す">×</button>` : '');
+    if (r.skip != null) return `<span class="use-chip"><span class="dt-skip">対象外</span>${rm('dt-skip-off')}</span>`;
+    // ファイルに書かれた順ではなく、ケースの番号順に並べる
+    const chips = r.cases
+      .map((id, i) => ({ id, i, c: caseOf(id) }))
+      .sort((a, b) => (a.c?.no ?? Infinity) - (b.c?.no ?? Infinity))
+      .map(({ id, i, c }) => {
+        const chip = c
+          ? `<button class="use-case ${c.status === '無効' ? 'excluded' : ''}" data-act="open-case" data-api="${esc(state.api)}" data-level="${state.level}" data-id="${c.id}" title="${esc(c.title)}">#${c.no}</button>`
+          : `<span class="use-missing" title="該当するケースがありません（${esc(id)}）">${esc(shortId(id))}</span>`;
+        return `<span class="use-chip">${chip}${rm('dt-case-remove', `data-index="${i}"`)}</span>`;
+      })
+      .join('');
+    const none = r.cases.length ? '' : '<span class="dt-none">ケースなし</span>';
+    const tools = e
+      ? `<div class="dt-case-tools"><button type="button" class="link" data-act="dt-case-add" ${attrs(x)}>+ ケース</button>${
+          r.cases.length ? '' : `<button type="button" class="link" data-act="dt-skip-on" ${attrs(x)}>対象外にする</button>`
+        }</div>`
+      : '';
+    return `${chips}${none}${tools}`;
+  };
+  const caseRow = rules
+    .map((x) => `<td class="${colCls(x)} ${x.change?.type === 'changed' && x.change.cases ? 'cell-changed' : ''}" ${attrs(x)}>${caseCell(x)}</td>`)
+    .join('');
+
+  const live = t.rules.filter((r) => !r._deleted);
+  const n = (st) => live.filter((r) => ruleState(r) === st).length;
+  const skips = rules.filter((x) => !x.r._deleted && x.r.skip != null);
+  // ルールとケース名の対応。ケースが多いAPIでは長くなるので、開いたときだけ出す
+  const linked = rules.filter((x) => !x.r._deleted && x.r.skip == null);
+  const listOpen = state.dtListOpen.has(t.id);
+  const caseCount = linked.reduce((sum, x) => sum + x.r.cases.length, 0);
+  const caseList = !linked.length
+    ? ''
+    : `<div class="dt-list"><button type="button" class="link dt-list-toggle" data-act="dt-list-toggle" data-table="${tid}" aria-expanded="${listOpen}">${listOpen ? '▾' : '▸'} ルールとケースの対応（ケース ${caseCount}）</button>${
+        !listOpen
+          ? ''
+          : `<ul>${linked
+              .map(
+                (x) => `<li><span class="mono dt-list-rule">${ruleLabel(x.i)}</span><span class="dt-list-cases">${
+                  x.r.cases.length
+                    ? x.r.cases
+                        .map((id) => ({ id, c: caseOf(id) }))
+                        .sort((a, b) => (a.c?.no ?? Infinity) - (b.c?.no ?? Infinity))
+                        .map(({ id, c }) => {
+                          return c
+                            ? `<button type="button" class="dt-list-case ${c.status === '無効' ? 'excluded' : ''}" data-act="open-case" data-api="${esc(state.api)}" data-level="${state.level}" data-id="${c.id}"><span class="mono">#${c.no}</span>${esc(c.title)}</button>`
+                            : `<span class="dt-list-case"><span class="use-missing">${esc(shortId(id))}</span>該当するケースがありません</span>`;
+                        })
+                        .join('')
+                    : '<span class="dt-none">ケースなし</span>'
+                }</span></li>`,
+              )
+              .join('')}</ul>`
+      }</div>`;
+  const addRow = (act, label) => (editable ? `<tr class="dt-add"><th colspan="${span}"><button type="button" class="link" data-act="${act}" data-table="${tid}">${label}</button></th></tr>` : '');
+  const edit = (kind) => (editable ? `class="dt-editable" data-dtedit="${kind}" data-table="${tid}" title="クリックして編集"` : '');
+
+  return `<section class="dt ${change ? `dt-t-${change.type}` : ''}" data-dt="${tid}">
+    <div class="dt-head">${change ? `<span class="type ${change.type}">${DATA_TYPE_LABEL[change.type]}</span>` : ''}<h2 ${edit('tname')}>${esc(t.name)}</h2>
+      <span class="summary">ルール ${live.length}${n('none') ? ` · <span class="dt-none">ケースなし ${n('none')}</span>` : ''}${n('skip') ? ` · 対象外 ${n('skip')}` : ''}</span>
+      ${editable ? `<span class="dt-table-actions">${change?.type === 'changed' ? `<button class="link" data-act="dt-table-revert" data-table="${tid}">この表の変更を戻す</button>` : ''}<button class="link" data-act="dt-table-del" data-table="${tid}">${t._new ? '追加を取り消す' : '表を削除'}</button></span>` : ''}</div>
+    ${t.description || editable ? `<p class="dt-desc"><span ${edit('tdesc')}>${t.description ? esc(t.description) : '<span class="placeholder">（説明を入力）</span>'}</span></p>` : ''}
+    <div class="dt-scroll"><table class="dt-table ${editable ? 'can-edit' : ''}">
+      <thead><tr><th class="dt-corner"></th>${head}${editable ? `<th class="dt-fill"><button type="button" class="link" data-act="dt-rule-add" data-table="${tid}">+ ルール</button></th>` : ''}</tr></thead>
+      <tbody>
+        <tr class="dt-sec"><th colspan="${span}">条件</th></tr>
+        ${condRows}${addRow('dt-cond-add', '+ 条件')}
+        <tr class="dt-sec"><th colspan="${span}">結果</th></tr>
+        ${actionRows}${addRow('dt-action-add', '+ 結果')}
+        <tr class="dt-sec"><th colspan="${span}">テスト</th></tr>
+        <tr class="dt-cases"><th>ケース</th>${caseRow}${filler}</tr>
+      </tbody>
+    </table></div>
+    ${caseList}
+    ${
+      skips.length
+        ? `<ul class="dt-notes">${skips
+            .map(
+              (x) => `<li><span class="mono">${ruleLabel(x.i)}</span><span class="dt-skip">対象外</span><span ${
+                editable ? `class="dt-editable" data-dtedit="skip" data-table="${tid}" data-rule="${esc(x.r.id)}" title="クリックして編集"` : ''
+              }>${x.r.skip ? esc(x.r.skip) : '<span class="placeholder">（テストしない理由を入力）</span>'}</span></li>`,
+            )
+            .join('')}</ul>`
+        : ''
+    }
+  </section>`;
+}
+
+function renderDt() {
+  const d = state.dt;
+  const versions = state.dtVersionsBy[d.branch] ?? [];
+  const isPast = d.v && (d.v !== versions.at(-1)?.id || (state.currentBranch && d.branch !== state.currentBranch));
+  const editable = canEditDt();
+  const tables = dtTables();
+  const rules = tables.filter((t) => !t._deleted).flatMap((t) => t.rules.filter((r) => !r._deleted));
+  const none = rules.filter((r) => ruleState(r) === 'none').length;
+  const missing = rules.reduce((n, r) => n + (r.skip != null ? 0 : r.cases.filter((id) => !d.cases.some((c) => c.id === id)).length), 0);
+  const warn = [
+    none ? `ケースがないルールが ${none} 件あります。ケースを紐付けるか、対象外の理由を書いてください` : '',
+    missing ? `該当するケースがない紐付けが ${missing} 件あります（赤字）` : '',
+  ].filter(Boolean);
+  const body = d.missing
+    ? `<div class="dt-empty">このブランチには、このAPIのディシジョンテーブルがまだありません。
+        <div class="mono">decision-tables/${state.level}/${esc(state.api)}.yaml</div>を作成すると、ここに表示されます。</div>`
+    : tables.map((t) => dtTableHtml(t, d.cases, editable)).join('') || '<div class="dt-empty">表がありません</div>';
+  return `<div class="data-view">
+    <div class="specs-head">
+      <div class="pane-head">${crumb()}${paneTabs()}<div class="spacer"></div>${state.branches.length ? dtModeSwitch() : ''}</div>
+      <div class="pane-head sub">
+        ${branchSelect('dt-branch', d.branch)}
+        ${versions.length ? `<select data-act="dt-version">${versions.map((x) => `<option value="${x.id}" ${x.id === d.v ? 'selected' : ''}>${esc(x.label)}${x === versions.at(-1) ? ' · 最新' : ''}</option>`).join('')}</select>` : ''}
+        <div class="spacer"></div>
+        ${d.missing ? '' : `<button class="btn primary" data-act="dt-table-add" ${editable ? '' : 'disabled'}>表を追加</button>`}
+      </div>
+      ${isPast ? '<div class="note">選んだブランチ・版の時点の内容です。ケース番号も、同じ時点のケースで表示しています。編集できるのは現在のブランチの最新だけです。</div>' : ''}
+      ${warn.map((w) => `<div class="note warn">${w}</div>`).join('')}
+      <div class="toolbar"><div class="summary">表 ${tables.filter((t) => !t._deleted).length} · ルール ${rules.length}</div>
+        <span class="legend"><span class="lg-title">表の見方</span>
+          <span class="lg"><code class="any">-</code>どちらでもよい</span>
+          <span class="lg"><code>✓</code>そのルールで起きる結果</span>
+        </span></div>
+    </div>
+    <div class="data-wrap dt-wrap" data-scroll="dt">${body}</div>
+  </div>`;
+}
+
+// ディシジョンテーブルの変更の一覧。表への移動と、表ごとの取り消しができる
+function dtChangesHtml() {
+  const rows = state.dtDraft.tables
+    .map((t) => ({ t, c: dtTableChange(t) }))
+    .filter((x) => x.c)
+    .map(({ t, c }) => {
+      const label = c.type === 'added' ? '追加を取り消す' : c.type === 'removed' ? '削除を取り消す' : '戻す';
+      return `<div class="ch-row">
+        <button class="ch-case" data-act="dt-jump" data-id="${esc(t.id)}"><span class="t">${esc(t.name)}</span><span class="f">${esc(c.what.join('、'))}</span></button>
+        <button class="link" data-act="dt-table-revert" data-table="${esc(t.id)}">${label}</button>
+      </div>`;
+    })
+    .join('');
+  return `<div class="ch-title">変更の一覧</div>${rows}`;
+}
+
+/* ---------- decision table diff ---------- */
+
+// 表・ルールは id で照合する。条件と結果の行は名前で照合する
+function diffDtTable(o, n) {
+  const t = n ?? o;
+  const lines = (namesOf) => {
+    const an = o ? namesOf(o) : [];
+    const bn = n ? namesOf(n) : [];
+    return [...bn.map((name) => ({ name, type: !o || an.includes(name) ? 'same' : 'added' })), ...(n ? an.filter((x) => !bn.includes(x)).map((name) => ({ name, type: 'removed' })) : [])];
+  };
+  const conds = lines(condNames);
+  const actions = lines(actionNames);
+  const key = (r) => JSON.stringify([conds.map((c) => whenOf(r, c.name)), [...(r.then ?? [])].sort(), r.cases ?? [], r.skip ?? '']);
+  const before = new Map((o?.rules ?? []).map((r, i) => [r.id, { r, i }]));
+  const rules = (n?.rules ?? o.rules ?? []).map((r, i) => {
+    const b = n && o ? before.get(r.id) : null;
+    const type = !n || !o ? 'same' : !b ? 'added' : key(b.r) === key(r) ? 'same' : 'changed';
+    return { type, r, before: b?.r, label: ruleLabel(i) };
+  });
+  if (n && o) {
+    const ids = new Set(n.rules?.map((r) => r.id));
+    rules.push(...(o.rules ?? []).map((r, i) => ({ type: 'removed', r, label: ruleLabel(i) })).filter((x) => !ids.has(x.r.id)));
+  }
+  const nameFrom = o && n && o.name !== n.name ? o.name : null;
+  const changed = nameFrom !== null || [...conds, ...actions, ...rules].some((x) => x.type !== 'same');
+  return { type: !o ? 'added' : !n ? 'removed' : changed ? 'changed' : 'same', t, nameFrom, conds, actions, rules };
+}
+function computeDtDiff(a, b) {
+  const before = new Map(a.tables.map((t) => [t.id, t]));
+  const ids = new Set(b.tables.map((t) => t.id));
+  return [...b.tables.map((t) => diffDtTable(before.get(t.id), t)), ...a.tables.filter((t) => !ids.has(t.id)).map((t) => diffDtTable(t, null))];
+}
+
+const oldNew = (from, to) => `<span class="dt-chg"><span class="del">${from}</span><span class="arrow">→</span><span class="add">${to}</span></span>`;
+
+function dtDiffTableHtml(d) {
+  const { t, rules } = d;
+  const span = rules.length + 1;
+  const cls = (x) => (x.type === 'same' ? '' : `dt-${x.type}`);
+  const condCell = (x, name) => {
+    const v = whenOf(x.r, name);
+    const old = x.before && whenOf(x.before, name);
+    return x.type === 'changed' && old !== v ? oldNew(dtVal(old), dtVal(v)) : dtVal(v);
+  };
+  const actionCell = (x, a) => {
+    const now = (x.r.then ?? []).includes(a);
+    const was = x.before ? (x.before.then ?? []).includes(a) : now;
+    if (now && was) return '<span class="dt-check">✓</span>';
+    if (now) return '<span class="ref-tag add">+ ✓</span>';
+    return was ? '<span class="ref-tag del">− ✓</span>' : '';
+  };
+  const caseCell = (x) => {
+    const now = x.r.cases ?? [];
+    const was = x.before ? (x.before.cases ?? []) : now;
+    // 番号はその時点の並び順で決まるので、外したケースは前の時点、それ以外は後の時点の番号で出す
+    const label = (side, id) => {
+      const c = side.cases.find((y) => y.id === id);
+      return c ? `<span title="${esc(c.title)}">#${c.no}</span>` : esc(shortId(id));
+    };
+    const { a, b } = state.dtDiff;
+    const tags = [
+      ...now.map((id) => (was.includes(id) ? `<span class="ref-tag">${label(b, id)}</span>` : `<span class="ref-tag add">+ ${label(b, id)}</span>`)),
+      ...was.filter((id) => !now.includes(id)).map((id) => `<span class="ref-tag del">− ${label(a, id)}</span>`),
+    ];
+    const skipNow = x.r.skip ?? '';
+    const skipWas = x.before ? (x.before.skip ?? '') : skipNow;
+    if (skipNow && skipNow === skipWas) tags.push('<span class="dt-skip">対象外</span>');
+    else {
+      if (skipNow) tags.push(`<span class="ref-tag add" title="${esc(skipNow)}">+ 対象外</span>`);
+      if (skipWas) tags.push(`<span class="ref-tag del" title="${esc(skipWas)}">− 対象外</span>`);
+    }
+    return tags.join('') || '<span class="dt-none">ケースなし</span>';
+  };
+  const rowTh = (x) => `<th class="${cls(x)}">${esc(x.name)}${x.type === 'same' ? '' : `<span class="type ${x.type}">${DATA_TYPE_LABEL[x.type]}</span>`}</th>`;
+  const skipNotes = rules.filter((x) => x.type !== 'removed' && x.r.skip);
+  return `<section class="dt dt-t-${d.type}">
+    <div class="dt-head"><span class="type ${d.type}">${DATA_TYPE_LABEL[d.type]}</span>
+      <h2>${d.nameFrom !== null ? oldNew(esc(d.nameFrom), esc(t.name)) : esc(t.name)}</h2></div>
+    <div class="dt-scroll"><table class="dt-table">
+      <thead><tr><th class="dt-corner"></th>${rules.map((x) => `<th class="${cls(x)}">${x.label}${x.type === 'same' ? '' : `<span class="type ${x.type}">${DATA_TYPE_LABEL[x.type]}</span>`}</th>`).join('')}</tr></thead>
+      <tbody>
+        <tr class="dt-sec"><th colspan="${span}">条件</th></tr>
+        ${d.conds.map((c) => `<tr class="${cls(c)}">${rowTh(c)}${rules.map((x) => `<td class="${cls(x)}">${condCell(x, c.name)}</td>`).join('')}</tr>`).join('')}
+        <tr class="dt-sec"><th colspan="${span}">結果</th></tr>
+        ${d.actions.map((a) => `<tr class="${cls(a)}">${rowTh(a)}${rules.map((x) => `<td class="${cls(x)}">${actionCell(x, a.name)}</td>`).join('')}</tr>`).join('')}
+        <tr class="dt-sec"><th colspan="${span}">テスト</th></tr>
+        <tr class="dt-cases"><th>ケース</th>${rules.map((x) => `<td class="${cls(x)}">${caseCell(x)}</td>`).join('')}</tr>
+      </tbody>
+    </table></div>
+    ${skipNotes.length ? `<ul class="dt-notes">${skipNotes.map((x) => `<li><span class="mono">${x.label}</span><span class="dt-skip">対象外</span>${esc(x.r.skip)}</li>`).join('')}</ul>` : ''}
+  </section>`;
+}
+
+function renderDtDiff() {
+  const d = state.dtDiff;
+  const tables = computeDtDiff(d.a, d.b);
+  const rules = tables.flatMap((t) => (t.type === 'changed' ? t.rules : []));
+  const n = (list, type) => list.filter((x) => x.type === type).length;
+  const shown = d.onlyChanged ? tables.filter((t) => t.type !== 'same') : tables;
+  const options = (branch, cur) =>
+    (state.dtVersionsBy[branch] ?? []).map((v) => `<option value="${v.id}" ${v.id === cur ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
+  return `<div class="data-view">
+    <div class="diff-head">
+      <div class="row">${crumb()}${paneTabs()}<div class="spacer"></div>${dtModeSwitch()}</div>
+      <div class="row">
+        <label>比較元</label>${branchSelect('dt-diff-from-branch', d.fromBranch)}<select data-act="dt-diff-from">${options(d.fromBranch, d.from)}</select>
+        <span class="arrow">→</span>
+        <label>比較先</label>${branchSelect('dt-diff-to-branch', d.toBranch)}<select data-act="dt-diff-to">${options(d.toBranch, d.to)}</select>
+      </div>
+      <div class="row">
+        <div class="summary">表：追加 ${n(tables, 'added')} · 変更 ${n(tables, 'changed')} · 削除 ${n(tables, 'removed')} · 変更なし ${n(tables, 'same')}　ルール：追加 ${n(rules, 'added')} · 変更 ${n(rules, 'changed')} · 削除 ${n(rules, 'removed')}</div>
+        <label class="toggle"><input type="checkbox" data-act="dt-only-changed" ${d.onlyChanged ? 'checked' : ''}>変更のあった表のみ表示</label>
+      </div>
+    </div>
+    <div class="data-wrap dt-wrap" data-scroll="dt-diff">${shown.map(dtDiffTableHtml).join('') || '<div class="dt-empty">変更のあった表はありません</div>'}</div>
+  </div>`;
+}
+
 /* ---------- reading ---------- */
 
 function renderReading() {
@@ -1082,6 +1713,7 @@ function renderReading() {
         <div class="rmeta"><span class="case-no">#${c.no}</span>${caseTitle(c)}${caseMeta(c)}<div class="spacer"></div>${caseActions(c)}</div>
         ${caseDesc(c)}
         ${dataRefs(c, true)}
+        ${dtRefs(c, true)}
         ${caseBody(c, true)}
       </section>`,
     )
@@ -1101,6 +1733,7 @@ function renderDetail(c) {
     <div class="detail-actions">${caseActions(c)}</div>
     ${caseDesc(c)}
     ${dataRefs(c, false)}
+    ${dtRefs(c, false)}
     ${caseBody(c, false)}
   </aside>`;
 }
@@ -1248,7 +1881,9 @@ function updateSaveBar() {
   const isData = state.view === 'data';
   const ids = state.view === 'specs' ? dirtyIds() : [];
   const dataIds = isData && state.dataDraft ? dataDirtyRows().map((r) => r.id) : [];
-  const n = isData ? dataIds.length : ids.length;
+  const isDt = state.view === 'dt';
+  const dtN = isDt && state.dtDraft ? state.dtDraft.tables.filter(dtTableChange).length : 0;
+  const n = isDt ? dtN : isData ? dataIds.length : ids.length;
   bar.classList.toggle('show', n > 0);
   if (!n) {
     bar.innerHTML = '';
@@ -1263,12 +1898,12 @@ function updateSaveBar() {
         <button class="btn primary" data-act="save" id="save-btn">ファイルに保存</button>
       </div>`;
   }
-  const invalid = isData ? 0 : Object.keys(state.draft.raw).length;
+  const invalid = isData || isDt ? 0 : Object.keys(state.draft.raw).length;
   const count = bar.querySelector('.count');
-  count.innerHTML = `${invalid ? `JSONの形式が不正です (${invalid})` : `未保存の変更 ${n}${isData ? '件' : 'ケース'}`}<span class="caret">${state.changesOpen ? '▼' : '▲'}</span>`;
+  count.innerHTML = `${invalid ? `JSONの形式が不正です (${invalid})` : `未保存の変更 ${n}${isDt ? '表' : isData ? '件' : 'ケース'}`}<span class="caret">${state.changesOpen ? '▼' : '▲'}</span>`;
   count.classList.toggle('abn', invalid > 0);
   bar.querySelector('#save-btn').disabled = invalid > 0;
-  bar.querySelector('.changes').innerHTML = state.changesOpen ? (isData ? dataChangesHtml() : changesHtml(ids)) : '';
+  bar.querySelector('.changes').innerHTML = state.changesOpen ? (isDt ? dtChangesHtml() : isData ? dataChangesHtml() : changesHtml(ids)) : '';
 }
 
 // テストデータの変更の一覧。レコードへの移動と、レコードごとの取り消しができる
@@ -1336,22 +1971,18 @@ async function save() {
   if (missing) return toast(`#${missing.no} のケース名を入力してください`, true);
   const cases = orderedIds().map((id) => withoutNo(d.cases.has(id) ? fromEditCase(d.cases.get(id)) : originalCase(id)));
   try {
-    const { dataFiles } = await request(`/api/spec?api=${encodeURIComponent(state.api)}&level=${state.level}`, {
+    await request(`/api/spec?api=${encodeURIComponent(state.api)}&level=${state.level}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ etag: state.etag, cases }),
     });
     state.tree = await request('/api/tree');
-    await loadData(state.level, true);
+    await Promise.all([loadData(state.level, true), loadDtWorking()]);
     state.versions = await versionsOf(state.branch, true);
     state.draft = emptyDraft();
     await loadVersion(latestVersion());
     render();
-    toast(
-      dataFiles.length
-        ? `保存しました。テストデータの番号も書き換えました（${dataFiles.join(', ')}）`
-        : '保存しました。版として残すには git でコミットしてください',
-    );
+    toast('保存しました。版として残すには git でコミットしてください');
   } catch (err) {
     toast(err.message, true);
   }
@@ -1490,7 +2121,7 @@ function renderDiff() {
     : '';
   return `<div class="diff-view">
     <div class="diff-head">
-      <div class="row">${crumb()}<div class="spacer"></div>${caseModeSwitch()}</div>
+      <div class="row">${crumb()}${paneTabs()}<div class="spacer"></div>${caseModeSwitch()}</div>
       <div class="row">
         <label>比較元</label>${branchSelect('diff-from-branch', d.fromBranch)}<select data-act="diff-from">${versionOptions(d.fromBranch, d.from)}</select>
         <span class="arrow">→</span>
@@ -1525,6 +2156,23 @@ document.addEventListener('click', async (e) => {
   if (editable && !e.target.closest('.revert')) return openEditor(editable);
   const setBtn = e.target.closest('.cell-tools [data-set]');
   if (setBtn) return commitCellEditor(setBtn.closest('td'), setBtn.dataset.set);
+  const dtEdit = e.target.closest('[data-dtedit]');
+  if (dtEdit && !e.target.closest('button, input')) return openDtEditor(dtEdit);
+  const dtCell = e.target.closest('td.dt-cell');
+  if (dtCell && !e.target.closest('select')) {
+    const t = ensureDtDraft().tables.find((x) => x.id === dtCell.dataset.table);
+    const r = t.rules.find((x) => x.id === dtCell.dataset.rule);
+    if (dtCell.dataset.kind === 'action') {
+      const a = t.actions[dtCell.dataset.action].name;
+      r.then = r.then.includes(a) ? r.then.filter((x) => x !== a) : [...r.then, a];
+      settleDtDraft();
+      return render();
+    }
+    const c = t.conditions[dtCell.dataset.cond];
+    const cur = whenOf(r, c.name);
+    const opts = [...new Set([...c.values, '-', cur])];
+    return openDtSelect(dtCell, `<select class="dt-select" data-kind="cond">${opts.map((v) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${v === '-' ? '-（どちらでもよい）' : esc(v)}</option>`).join('')}</select>`);
+  }
   const ecell = e.target.closest('td.ecell');
   if (ecell && !e.target.closest('button, a, select, textarea')) return openCellEditor(ecell);
   const el = e.target.closest('[data-act]');
@@ -1554,8 +2202,111 @@ document.addEventListener('click', async (e) => {
       const { level, table, branch, v } = state.dataSel;
       return openData(level, table, { branch, v });
     }
+    case 'dt-rule-add':
+    case 'dt-rule-left':
+    case 'dt-rule-right':
+    case 'dt-row-move':
+    case 'dt-rule-dup':
+    case 'dt-rule-del':
+    case 'dt-rule-revert':
+    case 'dt-case-remove':
+    case 'dt-skip-on':
+    case 'dt-skip-off':
+    case 'dt-cond-add':
+    case 'dt-action-add':
+    case 'dt-row-del':
+    case 'dt-table-del':
+    case 'dt-table-revert':
+    case 'dt-table-add': {
+      const act = el.dataset.act;
+      const d = ensureDtDraft();
+      const t = d.tables.find((x) => x.id === el.dataset.table);
+      const r = t?.rules.find((x) => x.id === el.dataset.rule);
+      let after;
+      const swap = (list, i, j) => ([list[i], list[j]] = [list[j], list[i]]);
+      if (act === 'dt-rule-add') t.rules.push(newDtRule(t));
+      else if (act === 'dt-rule-left' || act === 'dt-rule-right') {
+        const i = t.rules.indexOf(r);
+        swap(t.rules, i, i + (act === 'dt-rule-left' ? -1 : 1));
+      } else if (act === 'dt-row-move') {
+        const i = Number(el.dataset.index);
+        swap(el.dataset.kind === 'cond' ? t.conditions : t.actions, i, i + Number(el.dataset.dir));
+      }
+      else if (act === 'dt-rule-dup') t.rules.splice(t.rules.indexOf(r) + 1, 0, newDtRule(t, r));
+      else if (act === 'dt-rule-del') r._new ? t.rules.splice(t.rules.indexOf(r), 1) : (r._deleted = true);
+      else if (act === 'dt-rule-revert') revertDtRule(t, r);
+      else if (act === 'dt-case-remove') r.cases.splice(Number(el.dataset.index), 1);
+      else if (act === 'dt-skip-off') r.skip = undefined;
+      else if (act === 'dt-skip-on') {
+        r.skip = '';
+        r.cases = [];
+        after = `[data-dtedit="skip"][data-rule="${r.id}"]`;
+      } else if (act === 'dt-cond-add') {
+        t.conditions.push({ name: '', values: [] });
+        after = `[data-dtedit="cond"][data-table="${t.id}"][data-index="${t.conditions.length - 1}"]`;
+      } else if (act === 'dt-action-add') {
+        t.actions.push({ name: '' });
+        after = `[data-dtedit="action"][data-table="${t.id}"][data-index="${t.actions.length - 1}"]`;
+      } else if (act === 'dt-row-del') {
+        const i = Number(el.dataset.index);
+        if (el.dataset.kind === 'cond') {
+          const [c] = t.conditions.splice(i, 1);
+          t.rules.forEach((x) => delete x.when[c.name]);
+        } else {
+          const [a] = t.actions.splice(i, 1);
+          t.rules.forEach((x) => (x.then = x.then.filter((y) => y !== a.name)));
+        }
+      } else if (act === 'dt-table-del') t._new ? d.tables.splice(d.tables.indexOf(t), 1) : (t._deleted = true);
+      else if (act === 'dt-table-revert') {
+        const i = d.tables.indexOf(t);
+        t._new ? d.tables.splice(i, 1) : (d.tables[i] = toDtModel([origDtTable(t.id)])[0]);
+      } else if (act === 'dt-table-add') {
+        const nt = { id: crypto.randomUUID(), name: '新しい表', conditions: [], actions: [], rules: [], _new: true };
+        d.tables.push(nt);
+        after = `[data-dtedit="tname"][data-table="${nt.id}"]`;
+      }
+      // 入力欄を開く操作のときは、空の行を消さないよう下書きを整理しない
+      if (!after) settleDtDraft();
+      render();
+      const target = after && $(after);
+      target?.scrollIntoView({ block: 'nearest' });
+      return target && openDtEditor(target);
+    }
+    case 'dt-case-add': {
+      const td = el.closest('td');
+      const t = dtTables().find((x) => x.id === td.dataset.table);
+      const r = t.rules.find((x) => x.id === td.dataset.rule);
+      const opts = state.dt.cases.filter((c) => !r.cases.includes(c.id));
+      return openDtSelect(td, `<select class="dt-select" data-kind="case"><option value="">ケースを選択</option>${opts.map((c) => `<option value="${c.id}">#${c.no} ${esc(c.title)}${c.status === '無効' ? '（無効）' : ''}</option>`).join('')}</select>`);
+    }
+    case 'dt-jump': {
+      const sec = $(`section[data-dt="${id}"]`);
+      sec?.scrollIntoView({ block: 'start' });
+      sec?.classList.add('flash');
+      return setTimeout(() => sec?.classList.remove('flash'), 1200);
+    }
+    case 'pane':
+      if ((el.dataset.pane === 'dt') === isDtView()) return;
+      if (blockedByDraft()) return;
+      if (el.dataset.pane === 'dt') return openDt();
+      state.view = 'specs';
+      return render();
+    case 'dt-mode':
+      if (el.dataset.viewTo === state.view) return;
+      if (blockedByDraft()) return;
+      return el.dataset.viewTo === 'dt-diff' ? openDtDiff({ to: state.dt?.v }) : openDt({ branch: state.dt?.branch, v: state.dt?.v });
+    case 'dt-list-toggle': {
+      const id = el.dataset.table;
+      if (!state.dtListOpen.delete(id)) state.dtListOpen.add(id);
+      render();
+      break;
+    }
+    case 'open-dt-rule':
+      if (blockedByDraft()) return;
+      return openDt({ branch: state.currentBranch ?? state.branch, focus: { table: el.dataset.table, rule: el.dataset.rule } });
     case 'open-case':
       if (blockedByDraft()) return;
+      state.view = 'specs';
       await selectSpec(el.dataset.api, el.dataset.level);
       state.mode = 'list';
       state.selectedId = id;
@@ -1640,11 +2391,12 @@ document.addEventListener('click', async (e) => {
       return;
     case 'discard':
       if (state.view === 'data') (state.dataDraft = null), (state.dataPicker = null);
+      else if (state.view === 'dt') state.dtDraft = null;
       else state.draft = emptyDraft();
       render();
       return toast('変更を破棄しました');
     case 'save':
-      return state.view === 'data' ? saveDataDraft() : save();
+      return state.view === 'dt' ? saveDtDraft() : state.view === 'data' ? saveDataDraft() : save();
     case 'data-add': {
       const rec = newDataRec();
       ensureDataDraft().rows.push(rec);
@@ -1689,13 +2441,11 @@ document.addEventListener('click', async (e) => {
       return render();
     case 'data-pick-ok': {
       const picker = el.closest('.ref-picker');
-      const name = picker.querySelector('[data-act="data-pick-name"]').value;
-      const no = picker.querySelector('.pick-no').value;
+      const ref = picker.querySelector('.pick-no').value;
       state.dataPicker = null;
-      if (!no) return render();
+      if (!ref) return render();
       ensureDataDraft();
       const r = dataRow(el.dataset.rec);
-      const ref = `${name}#${no}`;
       if (!r.cases.includes(ref)) r.cases.push(ref);
       settleDataDraft();
       return render();
@@ -1719,12 +2469,21 @@ document.addEventListener('click', async (e) => {
 
 // 「-」「NULL」などのボタンで入力欄のフォーカスが外れないようにする
 document.addEventListener('mousedown', (e) => {
-  if (e.target.closest('.cell-tools')) e.preventDefault();
+  if (e.target.closest('.cell-tools, .dt-editor button')) e.preventDefault();
 });
 
 document.addEventListener('focusout', (e) => {
   if (e.target.classList?.contains('inline-input')) commitEditor(e.target.closest('.editable'));
   // 「-」「NULL」などのボタンを押したときは、ボタンの方で確定する
+  // ディシジョンテーブルの入力欄。同じ入力欄の中（名前 → 値）の移動では確定しない
+  if (e.target.classList?.contains('dt-input') && !suppressCommit) {
+    const editor = e.target.closest('.dt-editor');
+    if (!editor.contains(e.relatedTarget)) commitDtEditor(editor.parentElement);
+  }
+  if (e.target.classList?.contains('dt-select') && !suppressCommit) {
+    settleDtDraft();
+    render();
+  }
   if (e.target.classList?.contains('cell-input') && !suppressCommit && !e.relatedTarget?.closest?.('.cell-tools')) {
     commitCellEditor(e.target.closest('td'), e.target.value);
   }
@@ -1732,6 +2491,18 @@ document.addEventListener('focusout', (e) => {
 
 document.addEventListener('change', async (e) => {
   const el = e.target;
+  if (el.classList.contains('dt-select')) {
+    const td = el.closest('td');
+    const t = ensureDtDraft().tables.find((x) => x.id === td.dataset.table);
+    const r = t.rules.find((x) => x.id === td.dataset.rule);
+    if (el.dataset.kind === 'cond') r.when[t.conditions[td.dataset.cond].name] = el.value;
+    else if (el.value) {
+      const noOf = (id) => state.dt.cases.find((c) => c.id === id)?.no ?? Infinity;
+      r.cases = [...r.cases, el.value].sort((a, b) => noOf(a) - noOf(b));
+    }
+    settleDtDraft();
+    return render();
+  }
   if (el.dataset.kind === 'enum') {
     ensureDraft(el.closest('[data-case]').dataset.case)[el.dataset.edit] = el.value;
     return render();
@@ -1777,6 +2548,23 @@ document.addEventListener('change', async (e) => {
       return openDataDiff({ ...state.dataDiff, fromBranch: el.value, from: undefined });
     case 'data-diff-to-branch':
       return openDataDiff({ ...state.dataDiff, toBranch: el.value, to: undefined });
+    case 'dt-branch':
+      if (blockedByDraft()) return render();
+      return openDt({ branch: el.value });
+    case 'dt-version':
+      if (blockedByDraft()) return render();
+      return openDt({ branch: state.dt.branch, v: el.value });
+    case 'dt-diff-from':
+      return openDtDiff({ ...state.dtDiff, from: el.value });
+    case 'dt-diff-to':
+      return openDtDiff({ ...state.dtDiff, to: el.value });
+    case 'dt-diff-from-branch':
+      return openDtDiff({ ...state.dtDiff, fromBranch: el.value, from: undefined });
+    case 'dt-diff-to-branch':
+      return openDtDiff({ ...state.dtDiff, toBranch: el.value, to: undefined });
+    case 'dt-only-changed':
+      state.dtDiff.onlyChanged = el.checked;
+      return render();
     case 'data-only-changed':
       state.dataDiff.onlyChanged = el.checked;
       return render();
@@ -1802,6 +2590,13 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('keydown', (e) => {
   const el = e.target;
+  if (el.classList?.contains('dt-input')) {
+    if (e.isComposing) return;
+    const host = el.closest('.dt-editor').parentElement;
+    if (e.key === 'Escape') e.preventDefault(), commitDtEditor(host, true);
+    else if (e.key === 'Enter') e.preventDefault(), commitDtEditor(host);
+    return;
+  }
   // テストデータのセル。Enter で確定、Shift+Enter で改行、Esc で取り消し
   if (el.classList?.contains('cell-input')) {
     if (e.isComposing) return;
