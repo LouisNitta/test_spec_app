@@ -1,4 +1,4 @@
-// fixtures/<サーバー>/<test-specs|test-data|decision-tables>/<レベル>/... から、版ごとにコミットしたサンプルのリポジトリを sample/<サーバー>/ に作る
+// fixtures/<サーバー>/<test-specs|test-data|decision-tables|matrices>/<レベル>/... から、版ごとにコミットしたサンプルのリポジトリを sample/<サーバー>/ に作る
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -17,10 +17,10 @@ for (const server of await fs.readdir(fixtures)) {
   for (const kind of await fs.readdir(path.join(fixtures, server))) {
     for (const level of await fs.readdir(path.join(fixtures, server, kind))) {
       for (const name of await fs.readdir(path.join(fixtures, server, kind, level))) {
-        // テストデータの CSV とディシジョンテーブルの YAML は版を持たず、そのまま 1 回コミットする
+        // テストデータの CSV と、ディシジョンテーブル・マトリクスの YAML は版を持たず、そのまま 1 回コミットする
         if (name.endsWith('.csv') || name.endsWith('.yaml')) {
           const text = await fs.readFile(path.join(fixtures, server, kind, level, name), 'utf8');
-          const [updatedAt, changes] = name.endsWith('.csv') ? ['2026-10-25', 'テストデータ定義を追加'] : ['2026-10-26', 'ディシジョンテーブルを追加'];
+          const [updatedAt, changes] = name.endsWith('.csv') ? ['2026-10-25', 'テストデータ定義を追加'] : ['2026-10-26', kind === 'matrices' ? 'マトリクスを追加' : 'ディシジョンテーブルを追加'];
           commits.push({ rel: `${kind}/${level}/${name}`, text, updatedAt, changes, v: 0 });
           continue;
         }

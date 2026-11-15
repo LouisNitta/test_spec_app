@@ -27,8 +27,17 @@ const specsDir = path.join(repoDir, 'test-specs');
 // テストデータの定義。実データの CSV と同じくレベルごと・テーブルごとに 1 ファイル（test-data/<level>/<table>.csv）
 const dataDir = path.join(repoDir, 'test-data');
 // ディシジョンテーブル。API・画面ごとに、ケースと同じファイル名で 1 ファイル（decision-tables/<level>/<api>.yaml）
-const dtDir = path.join(repoDir, 'decision-tables');
-const dtFile = (api, level) => path.join(dtDir, level, `${api}.yaml`);
+// 画面（ui）はディシジョンテーブルの代わりにマトリクスを使う（matrices/<level>/<画面>.yaml）。読み書きの仕組みは同じ
+const TABLE_DIR = { api: 'decision-tables', ui: 'matrices' };
+const dtFile = (api, level, type = 'api') => path.join(repoDir, TABLE_DIR[type] ?? TABLE_DIR.api, level, `${api}.yaml`);
+// API か画面かは、作業中のケースのファイルの meta.type で決める
+async function typeOf(api, level) {
+  try {
+    return yaml.load(await fs.readFile(filePath(api, level), 'utf8'))?.meta?.type === 'ui' ? 'ui' : 'api';
+  } catch {
+    return 'api';
+  }
+}
 const serverName = path.basename(repoDir);
 try {
   await fs.access(specsDir);
@@ -156,7 +165,7 @@ async function getTree() {
         byApi.set(name, { name, levels: [] });
         tree.push(byApi.get(name));
       }
-      byApi.get(name).levels.push({ level, api, count: spec.cases?.length ?? 0, dt: (await readDtWorking(api, level))?.tables.length ?? 0 });
+      byApi.get(name).levels.push({ level, api, count: spec.cases?.length ?? 0, dt: (await readDtWorking(api, level, spec.meta?.type))?.tables.length ?? 0 });
     }
   }
   return { server: serverName, items: tree.sort((a, b) => a.name.localeCompare(b.name, 'ja')), data: await getDataTree() };
@@ -164,24 +173,24 @@ async function getTree() {
 
 const exists = (file) => fs.access(file).then(() => true, () => false);
 const parseDt = (text) => ({ tables: yaml.load(text)?.tables ?? [] });
-async function readDtWorking(api, level) {
+async function readDtWorking(api, level, type) {
   try {
-    return parseDt(await fs.readFile(dtFile(api, level), 'utf8'));
+    return parseDt(await fs.readFile(dtFile(api, level, type), 'utf8'));
   } catch {
     return null; // ディシジョンテーブルがまだない
   }
 }
 
 // ファイルがまだないときは「作業中」の版も出さない
-async function getDtVersions(api, level, branch) {
-  const versions = await getVersions(dtFile(api, level), branch);
-  if (versions.at(-1)?.id === WORKING && !(await exists(dtFile(api, level)))) versions.pop();
+async function getDtVersions(file, branch) {
+  const versions = await getVersions(file, branch);
+  if (versions.at(-1)?.id === WORKING && !(await exists(file))) versions.pop();
   return versions;
 }
 
 // 指定したブランチ・版の時点のディシジョンテーブル。ルールが指すケース（id）を解決できるよう、同じ時点のケースの一覧も返す
-async function getDt(api, level, v, branch) {
-  const { working, hash, text } = await readAt(dtFile(api, level), v, branch);
+async function getDt(file, api, level, v, branch) {
+  const { working, hash, text } = await readAt(file, v, branch);
   let specText;
   try {
     specText = working ? await fs.readFile(filePath(api, level), 'utf8') : await git('show', `${hash}:./${relPath(api, level)}`);
@@ -193,8 +202,7 @@ async function getDt(api, level, v, branch) {
 }
 
 // ディシジョンテーブルを上書きする。読み込んだ後に他で書き換えられていたら止める
-async function saveDt(api, level, { etag, tables }) {
-  const file = dtFile(api, level);
+async function saveDt(file, { etag, tables }) {
   const text = await fs.readFile(file, 'utf8');
   if (etagOf(text) !== etag) {
     throw Object.assign(new Error('ファイルが他で変更されています。画面を再読み込みしてください。'), { status: 409 });
@@ -378,13 +386,14 @@ async function handleApi(req, res, url) {
   }
   if (!NAME.test(api ?? '') || !LEVELS.includes(level)) return send(res, 400, { error: 'api または level が不正です' });
 
-  if (url.pathname === '/api/dt/versions') return send(res, 200, await getDtVersions(api, level, branch));
-  if (url.pathname === '/api/dt' && req.method === 'POST') return send(res, 200, await saveDt(api, level, await readBody(req)));
+  const dtPath = url.pathname.startsWith('/api/dt') ? dtFile(api, level, await typeOf(api, level)) : null;
+  if (url.pathname === '/api/dt/versions') return send(res, 200, await getDtVersions(dtPath, branch));
+  if (url.pathname === '/api/dt' && req.method === 'POST') return send(res, 200, await saveDt(dtPath, await readBody(req)));
   if (url.pathname === '/api/dt') {
     const v = url.searchParams.get('v') ?? WORKING;
     if (v !== WORKING && !HASH.test(v)) return send(res, 400, { error: 'v が不正です' });
-    if (v === WORKING && !(await exists(dtFile(api, level)))) return send(res, 200, { tables: [], cases: [], missing: true });
-    return send(res, 200, await getDt(api, level, v, branch));
+    if (v === WORKING && !(await exists(dtPath))) return send(res, 200, { tables: [], cases: [], missing: true });
+    return send(res, 200, await getDt(dtPath, api, level, v, branch));
   }
   if (url.pathname === '/api/versions') return send(res, 200, await getVersions(filePath(api, level), branch));
   if (url.pathname === '/api/spec' && req.method === 'GET') {

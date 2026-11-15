@@ -1088,14 +1088,15 @@ function renderDataDiff() {
 // ディシジョンテーブルは API・画面に属するので、サイドバーではなく API のページの中でケースと切り替える
 const levelEntry = () => state.tree.items.flatMap((t) => t.levels).find((l) => l.api === state.api && l.level === state.level);
 const isDtView = () => state.view === 'dt' || state.view === 'dt-diff';
-// ディシジョンテーブルを管理するのは API だけ。画面（ui）ではタブを出さない
-const hasDt = () => specType(state.spec) === 'api';
+// API はディシジョンテーブル、画面（ui）はマトリクスを使う。ブランチ・版の選択、差分、下書き、保存の仕組みは共用する
+const hasDt = () => true;
+const isMx = () => specType(state.spec) === 'ui';
+const tableWord = () => (isMx() ? 'マトリクス' : 'ディシジョンテーブル');
 const paneTabs = () => {
-  if (!hasDt()) return '';
   const l = levelEntry();
   const tab = (pane, label, n) =>
     `<button data-act="pane" data-pane="${pane}" class="${(pane === 'dt') === isDtView() ? 'on' : ''}">${label}<span>${n ?? 0}</span></button>`;
-  return `<div class="pane-tabs">${tab('cases', 'ケース', l?.count)}${tab('dt', 'ディシジョンテーブル', l?.dt)}</div>`;
+  return `<div class="pane-tabs">${tab('cases', 'ケース', l?.count)}${tab('dt', tableWord(), l?.dt)}</div>`;
 };
 const dtModeSwitch = () => {
   const b = (view, label) => `<button data-act="dt-mode" data-view-to="${view}" class="${state.view === view ? 'on' : ''}">${label}</button>`;
@@ -1125,7 +1126,7 @@ async function openDt({ branch, v, focus } = {}) {
   state.dtFocus = focus ?? null;
   state.view = 'dt';
   render();
-  if (focus) $(`.dt-table th[data-rule="${focus.rule}"]`)?.scrollIntoView({ block: 'center', inline: 'center' });
+  if (focus) $(`.dt-table .focus[data-rule="${CSS.escape(focus.rule)}"]`)?.scrollIntoView({ block: 'center', inline: 'center' });
 }
 
 async function openDtDiff({ fromBranch, from, toBranch, to } = {}) {
@@ -1135,7 +1136,7 @@ async function openDtDiff({ fromBranch, from, toBranch, to } = {}) {
   const fromVs = (await dtVersionsOf(fromBranch)).map((x) => x.id);
   if (!toVs.includes(to)) to = toVs.at(-1);
   if (!fromVs.includes(from)) from = fromBranch === toBranch ? fromVs[Math.max(0, fromVs.indexOf(to) - 1)] : fromVs.at(-1);
-  if (!from || !to) return toast('このブランチにはディシジョンテーブルがありません', true);
+  if (!from || !to) return toast(`このブランチには${tableWord()}がありません`, true);
   const [a, b] = await Promise.all([request(dtUrl(fromBranch, from)), request(dtUrl(toBranch, to))]);
   Object.assign(state.dtDiff, { fromBranch, from, toBranch, to, a, b });
   state.view = 'dt-diff';
@@ -1153,6 +1154,7 @@ const ruleState = (r) => (r.skip != null ? 'skip' : (r.cases ?? []).length ? 'ok
 
 // ケースの詳細に出す、このケースを使っているルール
 function dtRefs(c, compact) {
+  if (isMx()) return mxRefs(c, compact);
   const refs = (state.dtWorking?.tables ?? []).flatMap((t) =>
     (t.rules ?? []).map((r, i) => ({ t, r, i })).filter(({ r }) => (r.cases ?? []).includes(c.id)),
   );
@@ -1166,11 +1168,237 @@ function dtRefs(c, compact) {
   return state.dtWorking?.tables.length ? `<h3>ディシジョンテーブル</h3><div class="ddata">${refs.length ? chips : '<span class="muted">なし</span>'}</div>` : '';
 }
 
+// 紐付けたケースのチップ。ファイルに書かれた順ではなく、ケースの番号順に並べる。rm には、外すボタンを作る関数を渡す
+const caseChips = (ids, cases, rm) =>
+  ids
+    .map((id, i) => ({ id, i, c: cases.find((c) => c.id === id) }))
+    .sort((a, b) => (a.c?.no ?? Infinity) - (b.c?.no ?? Infinity))
+    .map(({ id, i, c }) => {
+      const chip = c
+        ? `<button class="use-case ${c.status === '無効' ? 'excluded' : ''}" data-act="open-case" data-api="${esc(state.api)}" data-level="${state.level}" data-id="${c.id}" title="${esc(c.title)}">#${c.no}</button>`
+        : `<span class="use-missing" title="該当するケースがありません（${esc(id)}）">${esc(shortId(id))}</span>`;
+      return `<span class="use-chip">${chip}${rm(i)}</span>`;
+    })
+    .join('');
+
+// 表の下に出す、ケース名との対応の一覧。ケースが多いと長くなるので、開いたときだけ出す
+function caseListHtml(tableId, title, items, cases, wide = false) {
+  if (!items.length) return '';
+  const open = state.dtListOpen.has(tableId);
+  const count = items.reduce((sum, x) => sum + x.ids.length, 0);
+  const line = (id) => {
+    const c = cases.find((x) => x.id === id);
+    return c
+      ? `<button type="button" class="dt-list-case ${c.status === '無効' ? 'excluded' : ''}" data-act="open-case" data-api="${esc(state.api)}" data-level="${state.level}" data-id="${c.id}"><span class="mono">#${c.no}</span>${esc(c.title)}</button>`
+      : `<span class="dt-list-case"><span class="use-missing">${esc(shortId(id))}</span>該当するケースがありません</span>`;
+  };
+  const noOf = (id) => cases.find((c) => c.id === id)?.no ?? Infinity;
+  return `<div class="dt-list ${wide ? 'wide' : ''}"><button type="button" class="link dt-list-toggle" data-act="dt-list-toggle" data-table="${esc(tableId)}" aria-expanded="${open}">${open ? '▾' : '▸'} ${title}（ケース ${count}）</button>${
+    !open
+      ? ''
+      : `<ul>${items
+          .map(
+            (x) => `<li><span class="mono dt-list-rule">${esc(x.label)}</span><span class="dt-list-cases">${
+              x.ids.length ? x.ids.toSorted((a, b) => noOf(a) - noOf(b)).map(line).join('') : '<span class="dt-none">ケースなし</span>'
+            }</span></li>`,
+          )
+          .join('')}</ul>`
+  }</div>`;
+}
+
+/* ---------- matrix ---------- */
+
+// 画面（ui）用。行が確認する項目、列が条件で、確認するマスに ○ を付けてケースを紐付ける。○ のないマスは確認しない
+// ファイルは matrices/<level>/<画面>.yaml。cells に書かれているマスが ○ にあたる
+const toMxModel = (tables) =>
+  tables.map((t) => ({
+    ...t,
+    rows: (t.rows ?? []).map((x) => ({ name: String(x), _orig: String(x) })),
+    cols: (t.cols ?? []).map((x) => ({ name: String(x), _orig: String(x) })),
+    cells: (t.cells ?? []).map((c) => ({ ...c, row: String(c.row), col: String(c.col), cases: [...(c.cases ?? [])] })),
+  }));
+const mxCell = (t, row, col) => (t.cells ?? []).find((c) => String(c.row) === row && String(c.col) === col);
+const mxKey = (row, col) => `${row}\t${col}`;
+// 行・列にあるマスだけを、行→列の順に並べる
+const mxMarks = (t) => t.rows.flatMap((r) => t.cols.map((c) => mxCell(t, r.name, c.name)).filter(Boolean));
+
+// マスの変更。行・列の名前を変えていても、保存済みの名前で元のマスと比べる
+function mxCellChanged(t, r, c) {
+  if (t._new) return false;
+  const o = r._orig && c._orig ? mxCell(origDtTable(t.id), r._orig, c._orig) : undefined;
+  const d = mxCell(t, r.name, c.name);
+  return !!o !== !!d || (!!d && d.cases.join() !== (o.cases ?? []).join());
+}
+function mxTableChange(t) {
+  if (t._new) return { type: 'added', what: ['新規追加'] };
+  if (t._deleted) return { type: 'removed', what: ['削除'] };
+  const o = origDtTable(t.id);
+  const what = [];
+  const names = (list) => list.map((x) => x.name ?? String(x)).join('\n');
+  if (t.name !== o.name) what.push('名前');
+  if ((t.description ?? '') !== (o.description ?? '')) what.push('説明');
+  if (names(t.rows) !== names(o.rows ?? [])) what.push('行');
+  if (names(t.cols) !== names(o.cols ?? [])) what.push('列');
+  const n = t.rows.reduce((sum, r) => sum + t.cols.filter((c) => mxCellChanged(t, r, c)).length, 0);
+  if (n) what.push(`マス ${n}`);
+  return what.length ? { type: 'changed', what } : null;
+}
+// 保存する形に戻す。変更していない表は元の書き方のまま残す。変更した表のマスは、行→列の順に書く
+function mxPayload() {
+  return state.dtDraft.tables
+    .filter((t) => !t._deleted)
+    .map((t) => {
+      const o = origDtTable(t.id);
+      if (o && !mxTableChange(t)) return o;
+      const { _new, _deleted, id, name, description, rows, cols, cells, ...rest } = t;
+      return {
+        id,
+        name,
+        ...(description ? { description } : {}),
+        ...rest,
+        rows: rows.map((r) => r.name),
+        cols: cols.map((c) => c.name),
+        cells: mxMarks(t).map(({ row, col, cases, ...extra }) => ({ row, col, ...extra, cases })),
+      };
+    });
+}
+
+// ケースの詳細に出す、このケースを紐付けているマス
+function mxRefs(c, compact) {
+  const tables = state.dtWorking?.tables ?? [];
+  const refs = tables.flatMap((t) => (t.cells ?? []).filter((x) => (x.cases ?? []).includes(c.id)).map((x) => ({ t, x })));
+  const chips = refs
+    .map(
+      ({ t, x }) => `<button class="dref" data-act="open-dt-rule" data-table="${esc(t.id)}" data-rule="${esc(mxKey(x.row, x.col))}" title="マトリクスのこのマスを表示">
+        <span class="k">${esc(t.name)}</span><span class="p">${esc(x.row)} × ${esc(x.col)}</span></button>`,
+    )
+    .join('');
+  if (compact) return refs.length ? `<div class="rdata"><span class="rlabel">マトリクス</span><div class="chips">${chips}</div></div>` : '';
+  return tables.length ? `<h3>マトリクス</h3><div class="ddata">${refs.length ? chips : '<span class="muted">なし</span>'}</div>` : '';
+}
+
+function mxTableHtml(t, cases, editable) {
+  const tid = esc(t.id);
+  const change = state.dtDraft ? mxTableChange(t) : null;
+  if (t._deleted) {
+    return `<section class="dt dt-deleted" data-dt="${tid}"><div class="dt-head"><span class="type removed">削除</span><h2>${esc(t.name)}</h2>
+      <button class="link" data-act="dt-table-revert" data-table="${tid}">削除を取り消す</button></div></section>`;
+  }
+  const focus = state.dtFocus?.table === t.id ? state.dtFocus.rule : null;
+  const marks = mxMarks(t);
+  const none = marks.filter((c) => !c.cases.length).length;
+  const stray = t.cells.length - marks.length;
+  const edit = (kind, i) => (editable ? `class="dt-editable" data-dtedit="${kind}" data-table="${tid}" ${i == null ? '' : `data-index="${i}"`} title="クリックして編集"` : '');
+  const mv = (kind, i, dir, label, title) =>
+    `<button type="button" class="link" data-act="mx-move" data-kind="${kind}" data-table="${tid}" data-index="${i}" data-dir="${dir}" title="${title}" aria-label="${title}">${label}</button>`;
+  const isNew = (x) => state.dtDraft && !t._new && x._orig !== x.name;
+
+  const head = t.cols
+    .map((c, j) => {
+      const move = editable && t.cols.length > 1 ? `<span class="dt-rule-actions">${j > 0 ? mv('mxcol', j, -1, '←', '左へ移動') : ''}${j < t.cols.length - 1 ? mv('mxcol', j, 1, '→', '右へ移動') : ''}</span>` : '';
+      return `<th ${edit('mxcol', j)} ${isNew(c) ? 'data-changed' : ''}>${esc(c.name)}${move}</th>`;
+    })
+    .join('');
+
+  const cell = (r, i, c, j) => {
+    const x = mxCell(t, r.name, c.name);
+    const key = mxKey(r.name, c.name);
+    const pos = `data-table="${tid}" data-row="${i}" data-col="${j}"`;
+    const cls = `mx-cell ${state.dtDraft && mxCellChanged(t, r, c) ? 'cell-changed' : ''} ${key === focus ? 'focus' : ''}`;
+    if (!x) return editable ? `<td class="${cls} mx-off" data-act="mx-on" ${pos} title="クリックして ○ を付ける"></td>` : `<td class="${cls}"></td>`;
+    const rm = (i2) => (editable ? `<button type="button" class="ref-x" data-act="mx-case-remove" data-index="${i2}" aria-label="外す">×</button>` : '');
+    const tools = editable
+      ? `<div class="dt-case-tools"><button type="button" class="link" data-act="dt-case-add">+ ケース</button><button type="button" class="link" data-act="mx-off" data-table="${tid}">○ を外す</button></div>`
+      : '';
+    return `<td class="${cls}" data-rule="${esc(key)}" ${pos}><span class="mx-mark">○</span>${caseChips(x.cases, cases, rm)}${
+      x.cases.length ? '' : '<span class="dt-none">ケースなし</span>'
+    }${tools}</td>`;
+  };
+  const body = t.rows
+    .map((r, i) => {
+      const move = editable && t.rows.length > 1 ? `<span class="dt-row-move">${i > 0 ? mv('mxrow', i, -1, '↑', '上へ移動') : ''}${i < t.rows.length - 1 ? mv('mxrow', i, 1, '↓', '下へ移動') : ''}</span>` : '';
+      return `<tr><th ${edit('mxrow', i)} ${isNew(r) ? 'data-changed' : ''}>${esc(r.name)}${move}</th>${t.cols.map((c, j) => cell(r, i, c, j)).join('')}${editable ? '<td class="dt-fill"></td>' : ''}</tr>`;
+    })
+    .join('');
+  const span = t.cols.length + 1 + (editable ? 1 : 0);
+  const caseList = caseListHtml(t.id, 'マスとケースの対応', marks.map((x) => ({ label: `${x.row} × ${x.col}`, ids: x.cases })), cases, true);
+
+  return `<section class="dt ${change ? `dt-t-${change.type}` : ''}" data-dt="${tid}">
+    <div class="dt-head">${change ? `<span class="type ${change.type}">${DATA_TYPE_LABEL[change.type]}</span>` : ''}<h2 ${edit('tname')}>${esc(t.name)}</h2>
+      <span class="summary">確認するマス ${marks.length}${none ? ` · <span class="dt-none">ケースなし ${none}</span>` : ''}${stray ? ` · <span class="dt-none">行・列にないマス ${stray}</span>` : ''}</span>
+      ${editable ? `<span class="dt-table-actions">${change?.type === 'changed' ? `<button class="link" data-act="dt-table-revert" data-table="${tid}">この表の変更を戻す</button>` : ''}<button class="link" data-act="dt-table-del" data-table="${tid}">${t._new ? '追加を取り消す' : '表を削除'}</button></span>` : ''}</div>
+    ${t.description || editable ? `<p class="dt-desc"><span ${edit('tdesc')}>${t.description ? esc(t.description) : '<span class="placeholder">（説明を入力）</span>'}</span></p>` : ''}
+    <div class="dt-scroll"><table class="dt-table mx-table ${editable ? 'can-edit' : ''}">
+      <thead><tr><th class="dt-corner"></th>${head}${editable ? `<th class="dt-fill"><button type="button" class="link" data-act="mx-col-add" data-table="${tid}">+ 列</button></th>` : ''}</tr></thead>
+      <tbody>${body}${editable ? `<tr class="dt-add"><th colspan="${span}"><button type="button" class="link" data-act="mx-row-add" data-table="${tid}">+ 行</button></th></tr>` : ''}</tbody>
+    </table></div>
+    ${caseList}
+  </section>`;
+}
+
+// 表は id、行・列は名前で照合する
+function diffMxTable(o, n) {
+  const t = n ?? o;
+  const lines = (key) => {
+    const an = o ? (o[key] ?? []).map(String) : [];
+    const bn = n ? (n[key] ?? []).map(String) : [];
+    return [...bn.map((name) => ({ name, type: !o || an.includes(name) ? 'same' : 'added' })), ...(n ? an.filter((x) => !bn.includes(x)).map((name) => ({ name, type: 'removed' })) : [])];
+  };
+  const rows = lines('rows');
+  const cols = lines('cols');
+  const cells = rows.map((r) =>
+    cols.map((c) => {
+      const was = o && mxCell(o, r.name, c.name);
+      const now = n && mxCell(n, r.name, c.name);
+      const type = !o || !n || (!was && !now) ? 'same' : !was ? 'added' : !now ? 'removed' : (was.cases ?? []).join() !== (now.cases ?? []).join() ? 'changed' : 'same';
+      return { was, now, type };
+    }),
+  );
+  const nameFrom = o && n && o.name !== n.name ? o.name : null;
+  const changed = nameFrom !== null || [...rows, ...cols, ...cells.flat()].some((x) => x.type !== 'same');
+  return { type: !o ? 'added' : !n ? 'removed' : changed ? 'changed' : 'same', t, nameFrom, rows, cols, cells };
+}
+
+function mxDiffTableHtml(d) {
+  const { t } = d;
+  const { a, b } = state.dtDiff;
+  const cls = (x) => (x.type === 'same' ? '' : `dt-${x.type}`);
+  const th = (x) => `<th class="${cls(x)}">${esc(x.name)}${x.type === 'same' ? '' : `<span class="type ${x.type}">${DATA_TYPE_LABEL[x.type]}</span>`}</th>`;
+  // 番号はその時点の並び順で決まるので、外したケースは前の時点、それ以外は後の時点の番号で出す
+  const label = (side, id) => {
+    const c = side.cases.find((y) => y.id === id);
+    return c ? `<span title="${esc(c.title)}">#${c.no}</span>` : esc(shortId(id));
+  };
+  const cell = (x) => {
+    const cur = x.now ?? x.was;
+    if (!cur) return '';
+    const now = x.now?.cases ?? [];
+    const was = x.was?.cases ?? [];
+    const mark = x.type === 'added' ? '<span class="ref-tag add">+ ○</span>' : x.type === 'removed' ? '<span class="ref-tag del">− ○</span>' : '<span class="mx-mark">○</span>';
+    const tags = [
+      ...now.map((id) => (!x.was || was.includes(id) ? `<span class="ref-tag">${label(b, id)}</span>` : `<span class="ref-tag add">+ ${label(b, id)}</span>`)),
+      ...(x.now ? was.filter((id) => !now.includes(id)) : was).map((id) => `<span class="ref-tag ${x.now ? 'del' : ''}">${x.now ? '− ' : ''}${label(a, id)}</span>`),
+    ];
+    return `${mark}${tags.join('')}${x.now && !now.length ? '<span class="dt-none">ケースなし</span>' : ''}`;
+  };
+  return `<section class="dt dt-t-${d.type}">
+    <div class="dt-head"><span class="type ${d.type}">${DATA_TYPE_LABEL[d.type]}</span>
+      <h2>${d.nameFrom !== null ? oldNew(esc(d.nameFrom), esc(t.name)) : esc(t.name)}</h2></div>
+    <div class="dt-scroll"><table class="dt-table mx-table">
+      <thead><tr><th class="dt-corner"></th>${d.cols.map(th).join('')}</tr></thead>
+      <tbody>${d.rows
+        .map((r, i) => `<tr class="${cls(r)}">${th(r)}${d.cols.map((c, j) => `<td class="mx-cell ${cls(c)} ${d.cells[i][j].type === 'changed' ? 'dt-changed' : ''}">${cell(d.cells[i][j])}</td>`).join('')}</tr>`)
+        .join('')}</tbody>
+    </table></div>
+  </section>`;
+}
+
 /* ---------- decision table editing ---------- */
 
 // 表示と編集で同じ形を使う。条件・結果には、保存済みの名前（_orig）を持たせて名前の変更を追えるようにする
 // 編集中は、追加した表・ルールに _new、削除したものに _deleted を付ける。保存するまでファイルには書き込まない
-const toDtModel = (tables) =>
+const toDtModel = (tables) => (isMx() ? toMxModel(tables) : toRuleModel(tables));
+const toRuleModel = (tables) =>
   tables.map((t) => ({
     ...t,
     conditions: (t.conditions ?? []).map((c) => ({ name: c.name, values: [...(c.values ?? [])].map(String), _orig: c.name })),
@@ -1203,6 +1431,7 @@ function dtRuleChange(t, r) {
 }
 const plainConds = (list) => JSON.stringify((list ?? []).map((c) => [c.name, (c.values ?? []).map(String)]));
 function dtTableChange(t) {
+  if (isMx()) return mxTableChange(t);
   if (t._new) return { type: 'added', what: ['新規追加'] };
   if (t._deleted) return { type: 'removed', what: ['削除'] };
   const o = origDtTable(t.id);
@@ -1219,6 +1448,7 @@ function dtTableChange(t) {
 
 // 保存する形に戻す。変更していない表・ルールは元の書き方のまま残して、余計な差分を出さない
 function dtPayload() {
+  if (isMx()) return mxPayload();
   return state.dtDraft.tables
     .filter((t) => !t._deleted)
     .map((t) => {
@@ -1256,7 +1486,7 @@ async function saveDtDraft() {
   const noName = tables.find((t) => !t.name.trim());
   if (noName) return toast('表の名前を入力してください', true);
   for (const t of tables) {
-    const i = t.rules.findIndex((r) => !r._deleted && r.skip != null && !r.skip.trim());
+    const i = (t.rules ?? []).findIndex((r) => !r._deleted && r.skip != null && !r.skip.trim());
     if (i >= 0) return toast(`「${t.name}」の ${ruleLabel(i)} の対象外の理由を入力してください`, true);
   }
   try {
@@ -1316,8 +1546,10 @@ function openDtEditor(el) {
   else if (kind === 'tdesc') html = input('value', t.description ?? '', '表の説明');
   else if (kind === 'skip') html = input('value', t.rules.find((r) => r.id === rule).skip ?? '', 'テストしない理由');
   else if (kind === 'action') html = input('value', t.actions[index].name, '結果（例：400を返す）');
+  else if (kind === 'mxrow') html = input('value', t.rows[index].name, '行（例：メールアドレス）');
+  else if (kind === 'mxcol') html = input('value', t.cols[index].name, '列（例：未入力）');
   else html = input('value', t.conditions[index].name, '条件（例：名前）') + input('values', t.conditions[index].values.join(', '), '値をカンマ区切りで（例：あり, 空）');
-  const del = kind === 'cond' || kind === 'action' ? `<button type="button" class="link" data-act="dt-row-del" data-kind="${kind}" data-table="${esc(table)}" data-index="${index}">削除</button>` : '';
+  const del = ['cond', 'action', 'mxrow', 'mxcol'].includes(kind) ? `<button type="button" class="link" data-act="dt-row-del" data-kind="${kind}" data-table="${esc(table)}" data-index="${index}">削除</button>` : '';
   el.classList.add('editing');
   el.innerHTML = `<span class="dt-editor">${html}${del}</span>`;
   const first = el.querySelector('.dt-input');
@@ -1335,7 +1567,16 @@ function commitDtEditor(el, cancel = false) {
     if (kind === 'tname') t.name = value || t.name;
     else if (kind === 'tdesc') t.description = value;
     else if (kind === 'skip') t.rules.find((r) => r.id === rule).skip = value;
-    else {
+    else if (kind === 'mxrow' || kind === 'mxcol') {
+      // 行・列の名前を変えたら、マス側の書き方も合わせて変える
+      const [list, key] = kind === 'mxrow' ? [t.rows, 'row'] : [t.cols, 'col'];
+      const item = list[index];
+      if (list.some((x) => x !== item && x.name === value)) toast(`「${value}」はすでにあります`, true);
+      else if (value && value !== item.name) {
+        for (const c of t.cells) if (c[key] === item.name) c[key] = value;
+        item.name = value;
+      }
+    } else {
       const list = kind === 'cond' ? t.conditions : t.actions;
       const row = list[index];
       if (list.some((x) => x !== row && x.name === value)) toast(`「${value}」はすでにあります`, true);
@@ -1345,8 +1586,7 @@ function commitDtEditor(el, cancel = false) {
   }
   // 名前を入れずに閉じた行は残さない
   for (const t of state.dtDraft?.tables ?? []) {
-    t.conditions = t.conditions.filter((c) => c.name);
-    t.actions = t.actions.filter((a) => a.name);
+    for (const key of ['conditions', 'actions', 'rows', 'cols']) if (t[key]) t[key] = t[key].filter((x) => x.name);
   }
   settleDtDraft();
   render();
@@ -1429,23 +1669,12 @@ function dtTableHtml(t, cases, editable) {
     )
     .join('');
 
-  const caseOf = (id) => cases.find((c) => c.id === id);
   const caseCell = (x) => {
     const { r } = x;
     const e = can(x);
     const rm = (act, extra = '') => (e ? `<button type="button" class="ref-x" data-act="${act}" ${attrs(x)} ${extra} aria-label="外す">×</button>` : '');
     if (r.skip != null) return `<span class="use-chip"><span class="dt-skip">対象外</span>${rm('dt-skip-off')}</span>`;
-    // ファイルに書かれた順ではなく、ケースの番号順に並べる
-    const chips = r.cases
-      .map((id, i) => ({ id, i, c: caseOf(id) }))
-      .sort((a, b) => (a.c?.no ?? Infinity) - (b.c?.no ?? Infinity))
-      .map(({ id, i, c }) => {
-        const chip = c
-          ? `<button class="use-case ${c.status === '無効' ? 'excluded' : ''}" data-act="open-case" data-api="${esc(state.api)}" data-level="${state.level}" data-id="${c.id}" title="${esc(c.title)}">#${c.no}</button>`
-          : `<span class="use-missing" title="該当するケースがありません（${esc(id)}）">${esc(shortId(id))}</span>`;
-        return `<span class="use-chip">${chip}${rm('dt-case-remove', `data-index="${i}"`)}</span>`;
-      })
-      .join('');
+    const chips = caseChips(r.cases, cases, (i) => rm('dt-case-remove', `data-index="${i}"`));
     const none = r.cases.length ? '' : '<span class="dt-none">ケースなし</span>';
     const tools = e
       ? `<div class="dt-case-tools"><button type="button" class="link" data-act="dt-case-add" ${attrs(x)}>+ ケース</button>${
@@ -1461,33 +1690,7 @@ function dtTableHtml(t, cases, editable) {
   const live = t.rules.filter((r) => !r._deleted);
   const n = (st) => live.filter((r) => ruleState(r) === st).length;
   const skips = rules.filter((x) => !x.r._deleted && x.r.skip != null);
-  // ルールとケース名の対応。ケースが多いAPIでは長くなるので、開いたときだけ出す
-  const linked = rules.filter((x) => !x.r._deleted && x.r.skip == null);
-  const listOpen = state.dtListOpen.has(t.id);
-  const caseCount = linked.reduce((sum, x) => sum + x.r.cases.length, 0);
-  const caseList = !linked.length
-    ? ''
-    : `<div class="dt-list"><button type="button" class="link dt-list-toggle" data-act="dt-list-toggle" data-table="${tid}" aria-expanded="${listOpen}">${listOpen ? '▾' : '▸'} ルールとケースの対応（ケース ${caseCount}）</button>${
-        !listOpen
-          ? ''
-          : `<ul>${linked
-              .map(
-                (x) => `<li><span class="mono dt-list-rule">${ruleLabel(x.i)}</span><span class="dt-list-cases">${
-                  x.r.cases.length
-                    ? x.r.cases
-                        .map((id) => ({ id, c: caseOf(id) }))
-                        .sort((a, b) => (a.c?.no ?? Infinity) - (b.c?.no ?? Infinity))
-                        .map(({ id, c }) => {
-                          return c
-                            ? `<button type="button" class="dt-list-case ${c.status === '無効' ? 'excluded' : ''}" data-act="open-case" data-api="${esc(state.api)}" data-level="${state.level}" data-id="${c.id}"><span class="mono">#${c.no}</span>${esc(c.title)}</button>`
-                            : `<span class="dt-list-case"><span class="use-missing">${esc(shortId(id))}</span>該当するケースがありません</span>`;
-                        })
-                        .join('')
-                    : '<span class="dt-none">ケースなし</span>'
-                }</span></li>`,
-              )
-              .join('')}</ul>`
-      }</div>`;
+  const caseList = caseListHtml(t.id, 'ルールとケースの対応', rules.filter((x) => !x.r._deleted && x.r.skip == null).map((x) => ({ label: ruleLabel(x.i), ids: x.r.cases })), cases);
   const addRow = (act, label) => (editable ? `<tr class="dt-add"><th colspan="${span}"><button type="button" class="link" data-act="${act}" data-table="${tid}">${label}</button></th></tr>` : '');
   const edit = (kind) => (editable ? `class="dt-editable" data-dtedit="${kind}" data-table="${tid}" title="クリックして編集"` : '');
 
@@ -1528,17 +1731,19 @@ function renderDt() {
   const isPast = d.v && (d.v !== versions.at(-1)?.id || (state.currentBranch && d.branch !== state.currentBranch));
   const editable = canEditDt();
   const tables = dtTables();
-  const rules = tables.filter((t) => !t._deleted).flatMap((t) => t.rules.filter((r) => !r._deleted));
+  const mx = isMx();
+  // マトリクスでは、○ を付けたマスをルールと同じように数える
+  const rules = tables.filter((t) => !t._deleted).flatMap((t) => (mx ? mxMarks(t) : t.rules.filter((r) => !r._deleted)));
   const none = rules.filter((r) => ruleState(r) === 'none').length;
   const missing = rules.reduce((n, r) => n + (r.skip != null ? 0 : r.cases.filter((id) => !d.cases.some((c) => c.id === id)).length), 0);
   const warn = [
-    none ? `ケースがないルールが ${none} 件あります。ケースを紐付けるか、対象外の理由を書いてください` : '',
+    none ? (mx ? `ケースがないマスが ${none} 件あります。ケースを紐付けるか、○ を外してください` : `ケースがないルールが ${none} 件あります。ケースを紐付けるか、対象外の理由を書いてください`) : '',
     missing ? `該当するケースがない紐付けが ${missing} 件あります（赤字）` : '',
   ].filter(Boolean);
   const body = d.missing
-    ? `<div class="dt-empty">このブランチには、このAPIのディシジョンテーブルがまだありません。
-        <div class="mono">decision-tables/${state.level}/${esc(state.api)}.yaml</div>を作成すると、ここに表示されます。</div>`
-    : tables.map((t) => dtTableHtml(t, d.cases, editable)).join('') || '<div class="dt-empty">表がありません</div>';
+    ? `<div class="dt-empty">このブランチには、この${mx ? '画面のマトリクス' : 'APIのディシジョンテーブル'}がまだありません。
+        <div class="mono">${mx ? 'matrices' : 'decision-tables'}/${state.level}/${esc(state.api)}.yaml</div>を作成すると、ここに表示されます。</div>`
+    : tables.map((t) => (mx ? mxTableHtml : dtTableHtml)(t, d.cases, editable)).join('') || '<div class="dt-empty">表がありません</div>';
   return `<div class="data-view">
     <div class="specs-head">
       <div class="pane-head">${crumb()}${paneTabs()}<div class="spacer"></div>${state.branches.length ? dtModeSwitch() : ''}</div>
@@ -1550,11 +1755,12 @@ function renderDt() {
       </div>
       ${isPast ? '<div class="note">選んだブランチ・版の時点の内容です。ケース番号も、同じ時点のケースで表示しています。編集できるのは現在のブランチの最新だけです。</div>' : ''}
       ${warn.map((w) => `<div class="note warn">${w}</div>`).join('')}
-      <div class="toolbar"><div class="summary">表 ${tables.filter((t) => !t._deleted).length} · ルール ${rules.length}</div>
-        <span class="legend"><span class="lg-title">表の見方</span>
-          <span class="lg"><code class="any">-</code>どちらでもよい</span>
-          <span class="lg"><code>✓</code>そのルールで起きる結果</span>
-        </span></div>
+      <div class="toolbar"><div class="summary">表 ${tables.filter((t) => !t._deleted).length} · ${mx ? '確認するマス' : 'ルール'} ${rules.length}</div>
+        <span class="legend"><span class="lg-title">表の見方</span>${
+          mx
+            ? '<span class="lg"><code>○</code>確認するマス</span><span class="lg"><code>&nbsp;</code>確認しないマス</span>'
+            : '<span class="lg"><code class="any">-</code>どちらでもよい</span><span class="lg"><code>✓</code>そのルールで起きる結果</span>'
+        }</span></div>
     </div>
     <div class="data-wrap dt-wrap" data-scroll="dt">${body}</div>
   </div>`;
@@ -1604,9 +1810,10 @@ function diffDtTable(o, n) {
   return { type: !o ? 'added' : !n ? 'removed' : changed ? 'changed' : 'same', t, nameFrom, conds, actions, rules };
 }
 function computeDtDiff(a, b) {
+  const diff = isMx() ? diffMxTable : diffDtTable;
   const before = new Map(a.tables.map((t) => [t.id, t]));
   const ids = new Set(b.tables.map((t) => t.id));
-  return [...b.tables.map((t) => diffDtTable(before.get(t.id), t)), ...a.tables.filter((t) => !ids.has(t.id)).map((t) => diffDtTable(t, null))];
+  return [...b.tables.map((t) => diff(before.get(t.id), t)), ...a.tables.filter((t) => !ids.has(t.id)).map((t) => diff(t, null))];
 }
 
 const oldNew = (from, to) => `<span class="dt-chg"><span class="del">${from}</span><span class="arrow">→</span><span class="add">${to}</span></span>`;
@@ -1672,7 +1879,8 @@ function dtDiffTableHtml(d) {
 function renderDtDiff() {
   const d = state.dtDiff;
   const tables = computeDtDiff(d.a, d.b);
-  const rules = tables.flatMap((t) => (t.type === 'changed' ? t.rules : []));
+  const mx = isMx();
+  const rules = tables.flatMap((t) => (t.type === 'changed' ? (mx ? t.cells.flat() : t.rules) : []));
   const n = (list, type) => list.filter((x) => x.type === type).length;
   const shown = d.onlyChanged ? tables.filter((t) => t.type !== 'same') : tables;
   const options = (branch, cur) =>
@@ -1686,11 +1894,11 @@ function renderDtDiff() {
         <label>比較先</label>${branchSelect('dt-diff-to-branch', d.toBranch)}<select data-act="dt-diff-to">${options(d.toBranch, d.to)}</select>
       </div>
       <div class="row">
-        <div class="summary">表：追加 ${n(tables, 'added')} · 変更 ${n(tables, 'changed')} · 削除 ${n(tables, 'removed')} · 変更なし ${n(tables, 'same')}　ルール：追加 ${n(rules, 'added')} · 変更 ${n(rules, 'changed')} · 削除 ${n(rules, 'removed')}</div>
+        <div class="summary">表：追加 ${n(tables, 'added')} · 変更 ${n(tables, 'changed')} · 削除 ${n(tables, 'removed')} · 変更なし ${n(tables, 'same')}　${mx ? 'マス' : 'ルール'}：追加 ${n(rules, 'added')} · 変更 ${n(rules, 'changed')} · 削除 ${n(rules, 'removed')}</div>
         <label class="toggle"><input type="checkbox" data-act="dt-only-changed" ${d.onlyChanged ? 'checked' : ''}>変更のあった表のみ表示</label>
       </div>
     </div>
-    <div class="data-wrap dt-wrap" data-scroll="dt-diff">${shown.map(dtDiffTableHtml).join('') || '<div class="dt-empty">変更のあった表はありません</div>'}</div>
+    <div class="data-wrap dt-wrap" data-scroll="dt-diff">${shown.map(mx ? mxDiffTableHtml : dtDiffTableHtml).join('') || '<div class="dt-empty">変更のあった表はありません</div>'}</div>
   </div>`;
 }
 
@@ -2202,6 +2410,12 @@ document.addEventListener('click', async (e) => {
       const { level, table, branch, v } = state.dataSel;
       return openData(level, table, { branch, v });
     }
+    case 'mx-row-add':
+    case 'mx-col-add':
+    case 'mx-move':
+    case 'mx-on':
+    case 'mx-off':
+    case 'mx-case-remove':
     case 'dt-rule-add':
     case 'dt-rule-left':
     case 'dt-rule-right':
@@ -2220,11 +2434,24 @@ document.addEventListener('click', async (e) => {
     case 'dt-table-add': {
       const act = el.dataset.act;
       const d = ensureDtDraft();
-      const t = d.tables.find((x) => x.id === el.dataset.table);
-      const r = t?.rules.find((x) => x.id === el.dataset.rule);
+      const t = d.tables.find((x) => x.id === (el.dataset.table ?? el.closest('td')?.dataset.table));
+      const r = t?.rules?.find((x) => x.id === el.dataset.rule);
       let after;
+      // マトリクスのマス。行・列は、表の中の位置で受け取る
+      const td = el.closest('td');
+      const [mr, mc] = [t?.rows?.[td?.dataset.row]?.name, t?.cols?.[td?.dataset.col]?.name];
       const swap = (list, i, j) => ([list[i], list[j]] = [list[j], list[i]]);
-      if (act === 'dt-rule-add') t.rules.push(newDtRule(t));
+      if (act === 'mx-on') t.cells.push({ row: mr, col: mc, cases: [] });
+      else if (act === 'mx-off') t.cells = t.cells.filter((c) => !(c.row === mr && c.col === mc));
+      else if (act === 'mx-case-remove') mxCell(t, mr, mc).cases.splice(Number(el.dataset.index), 1);
+      else if (act === 'mx-move') {
+        const i = Number(el.dataset.index);
+        swap(el.dataset.kind === 'mxrow' ? t.rows : t.cols, i, i + Number(el.dataset.dir));
+      } else if (act === 'mx-row-add' || act === 'mx-col-add') {
+        const [list, kind] = act === 'mx-row-add' ? [t.rows, 'mxrow'] : [t.cols, 'mxcol'];
+        list.push({ name: '' });
+        after = `[data-dtedit="${kind}"][data-table="${t.id}"][data-index="${list.length - 1}"]`;
+      } else if (act === 'dt-rule-add') t.rules.push(newDtRule(t));
       else if (act === 'dt-rule-left' || act === 'dt-rule-right') {
         const i = t.rules.indexOf(r);
         swap(t.rules, i, i + (act === 'dt-rule-left' ? -1 : 1));
@@ -2249,7 +2476,11 @@ document.addEventListener('click', async (e) => {
         after = `[data-dtedit="action"][data-table="${t.id}"][data-index="${t.actions.length - 1}"]`;
       } else if (act === 'dt-row-del') {
         const i = Number(el.dataset.index);
-        if (el.dataset.kind === 'cond') {
+        if (el.dataset.kind === 'mxrow' || el.dataset.kind === 'mxcol') {
+          const [list, key] = el.dataset.kind === 'mxrow' ? [t.rows, 'row'] : [t.cols, 'col'];
+          const [x] = list.splice(i, 1);
+          t.cells = t.cells.filter((c) => c[key] !== x.name);
+        } else if (el.dataset.kind === 'cond') {
           const [c] = t.conditions.splice(i, 1);
           t.rules.forEach((x) => delete x.when[c.name]);
         } else {
@@ -2261,7 +2492,7 @@ document.addEventListener('click', async (e) => {
         const i = d.tables.indexOf(t);
         t._new ? d.tables.splice(i, 1) : (d.tables[i] = toDtModel([origDtTable(t.id)])[0]);
       } else if (act === 'dt-table-add') {
-        const nt = { id: crypto.randomUUID(), name: '新しい表', conditions: [], actions: [], rules: [], _new: true };
+        const nt = { id: crypto.randomUUID(), name: '新しい表', ...(isMx() ? { rows: [], cols: [], cells: [] } : { conditions: [], actions: [], rules: [] }), _new: true };
         d.tables.push(nt);
         after = `[data-dtedit="tname"][data-table="${nt.id}"]`;
       }
@@ -2275,7 +2506,7 @@ document.addEventListener('click', async (e) => {
     case 'dt-case-add': {
       const td = el.closest('td');
       const t = dtTables().find((x) => x.id === td.dataset.table);
-      const r = t.rules.find((x) => x.id === td.dataset.rule);
+      const r = isMx() ? mxCell(t, t.rows[td.dataset.row].name, t.cols[td.dataset.col].name) : t.rules.find((x) => x.id === td.dataset.rule);
       const opts = state.dt.cases.filter((c) => !r.cases.includes(c.id));
       return openDtSelect(td, `<select class="dt-select" data-kind="case"><option value="">ケースを選択</option>${opts.map((c) => `<option value="${c.id}">#${c.no} ${esc(c.title)}${c.status === '無効' ? '（無効）' : ''}</option>`).join('')}</select>`);
     }
@@ -2494,7 +2725,7 @@ document.addEventListener('change', async (e) => {
   if (el.classList.contains('dt-select')) {
     const td = el.closest('td');
     const t = ensureDtDraft().tables.find((x) => x.id === td.dataset.table);
-    const r = t.rules.find((x) => x.id === td.dataset.rule);
+    const r = isMx() ? mxCell(t, t.rows[td.dataset.row].name, t.cols[td.dataset.col].name) : t.rules.find((x) => x.id === td.dataset.rule);
     if (el.dataset.kind === 'cond') r.when[t.conditions[td.dataset.cond].name] = el.value;
     else if (el.value) {
       const noOf = (id) => state.dt.cases.find((c) => c.id === id)?.no ?? Infinity;

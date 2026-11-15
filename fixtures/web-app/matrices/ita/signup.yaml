@@ -1,0 +1,32 @@
+tables:
+  - id: c3f1a8d2-6b4e-4d09-8a7c-1e5f9b2d4a01
+    name: 入力項目ごとのエラー表示
+    description: 入力項目ごとに、どの入力エラーを確認するかをまとめる。
+    rows:
+      - 名前
+      - メールアドレス
+      - パスワード
+      - 利用規約の同意
+    cols:
+      - 未入力
+      - 形式が不正
+      - 登録済み
+    cells:
+      - row: 名前
+        col: 未入力
+        cases: []
+      - row: メールアドレス
+        col: 未入力
+        cases: []
+      - row: メールアドレス
+        col: 登録済み
+        cases:
+          - 3d8b5e4c-a06f-4c93-9e27-f4a9b0c5d303
+      - row: パスワード
+        col: 形式が不正
+        cases:
+          - 4e9c6f5d-b17a-4da4-8f38-a5b0c1d6e404
+      - row: 利用規約の同意
+        col: 未入力
+        cases:
+          - 5fad7a6e-c28b-4eb5-9a49-b6c1d2e7f505

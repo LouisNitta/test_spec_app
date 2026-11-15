@@ -594,3 +594,17 @@ button.dt-list-case:hover { color: var(--accent); }
 .dt.dt-deleted h2 { text-decoration: line-through; color: var(--text-3); }
 .dt.flash { animation: flash 1.2s; }
 .dt .placeholder { color: var(--text-3); }
+
+/* マトリクス */
+.mx-table thead th { font-family: var(--font); }
+.mx-table thead th[data-changed], .mx-table tbody th[data-changed] { background: var(--amber-bg); }
+.mx-table td.mx-cell { white-space: normal; min-width: 132px; max-width: 200px; }
+.mx-table.can-edit td.mx-off { cursor: pointer; }
+.mx-table.can-edit td.mx-off:hover { background: var(--bg-subtle); }
+.mx-table.can-edit td.mx-off:hover::after { content: '○'; color: var(--text-3); }
+.mx-mark { color: var(--accent); font-weight: 600; margin-right: 4px; }
+.mx-table .use-case, .mx-table .use-missing { margin: 1px 2px; }
+.mx-table .dt-none { display: block; font-size: 11.5px; }
+.mx-table td:hover .dt-case-tools { visibility: visible; }
+.mx-table .dt-case-tools { flex-direction: row; justify-content: center; gap: 10px; white-space: nowrap; }
+.dt-list.wide .dt-list-rule { width: 240px; font-family: var(--font); }
